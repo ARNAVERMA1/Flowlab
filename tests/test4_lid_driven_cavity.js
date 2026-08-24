@@ -156,6 +156,12 @@ test("Test 4 - cavity stays accurate at Re=400 and Re=1000", () => {
   // below 2; at 64x64 it is 6.3 at Re=400 and 15.6 at Re=1000, so this is
   // deliberately being run outside the comfortable regime to find out where
   // the scheme actually degrades rather than assuming.
+  //
+  // The larger Re=1000 error below is resolution, not a broken scheme. Run
+  // out of band at 128x128 (cell Re 7.8) the agreement improves from 0.0179
+  // to 0.0030 in u and 0.0201 to 0.0124 in v, and the vortex centre moves to
+  // (0.535, 0.566) against Ghia's (0.5313, 0.5645). That run takes about 8
+  // minutes, which is why the suite pins this at 64x64.
   for (const Re of [400, 1000]) {
     const run = runCavityToSteadyState({ n: N, Re });
     const u = uAlongVerticalCentreline(run.grid, Y, run.U);
