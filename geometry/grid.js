@@ -34,9 +34,45 @@ export class StaggeredGrid {
     this.u = new Float64Array(size);
     this.v = new Float64Array(size);
     this.p = new Float64Array(size);
+
+    // Cell-centred obstacle mask: 1 = solid, 0 = fluid. All fluid by
+    // default, so a grid with no obstacles behaves exactly as before.
+    // Bumping maskVersion tells the solver to rebuild anything it cached
+    // from the mask.
+    this.solid = new Uint8Array(size);
+    this.maskVersion = 0;
   }
 
   idx(i, j) {
     return i + this.stride * j;
   }
+
+  isSolid(i, j) {
+    return this.solid[i + this.stride * j] === 1;
+  }
+
+  cellCentre(i, j) {
+    return { x: (i - 0.5) * this.h, y: (j - 0.5) * this.h };
+  }
+}
+
+// Marks every cell whose centre lies inside the circle as solid. This is a
+// staircase representation of the body: the resolved shape is only accurate
+// to about one cell, which is the dominant geometric error for a curved
+// obstacle on a uniform grid. Cut-cell or immersed-boundary treatments that
+// would fix that are well beyond M0.
+export function stampCircle(grid, cx, cy, radius) {
+  const { nx, ny } = grid;
+  let count = 0;
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 1; i <= nx; i++) {
+      const { x, y } = grid.cellCentre(i, j);
+      if ((x - cx) ** 2 + (y - cy) ** 2 <= radius * radius) {
+        grid.solid[grid.idx(i, j)] = 1;
+        count++;
+      }
+    }
+  }
+  grid.maskVersion++;
+  return count;
 }
