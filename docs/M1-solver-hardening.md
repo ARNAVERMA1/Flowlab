@@ -118,15 +118,20 @@ Two modifiers:
 
 Walking it up until each scenario diverges:
 
-| safety | cavity | bend |
-|---|---|---|
-| 0.20 | stable | stable |
-| 0.40 | stable | stable |
-| 0.60 | stable | stable |
-| 0.80 | stable | **diverged** |
-| 0.95 | stable | — |
+| safety | cavity | sharp bend | cylinder |
+|---|---|---|---|
+| 0.20 | stable | stable | stable |
+| 0.40 | stable | stable | stable |
+| 0.60 | stable | stable | stable |
+| 0.80 | stable | **diverged** | stable |
+| 0.90 | stable | **diverged** | stable |
+| 0.95 | stable | **diverged** | stable |
 
 **0.4 is the default**, leaving 1.5× margin below the tightest observed boundary.
+
+The bend is the binding constraint and the only one: the cavity and the cylinder
+both survive 0.95. It fails at 0.80, 0.90 and 0.95 alike, so this is a
+reproducible boundary between 0.6 and 0.8 rather than one unlucky run.
 
 The bend's failure at 0.8 is instructive: it was caught by the post-step
 backstop as `became-non-finite`, not by the CFL check. The blow-up is local to

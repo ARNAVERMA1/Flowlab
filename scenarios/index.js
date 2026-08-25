@@ -19,10 +19,11 @@ import { StaggeredGrid, stampCircle, stampWhere } from "../geometry/grid.js";
 // of the hard stability limit it is willing to use.
 //
 // 0.4 is the default and is measured, not guessed. Walking the factor up until
-// each scenario diverges: the cavity survives 0.95, and the sharp bend is
-// stable to 0.6 and blows up at 0.8 - not on a CFL violation, but locally at
-// the mitre corner, which the linearised limit does not describe. 0.4 leaves
-// 1.5x margin below the tightest observed boundary.
+// each scenario diverges: the cavity and the cylinder both survive 0.95, and
+// the sharp bend is stable to 0.6 and blows up at 0.8, 0.9 and 0.95 alike -
+// not on a CFL violation, but locally at the mitre corner, which the
+// linearised limit does not describe. The bend is the binding constraint, and
+// 0.4 leaves 1.5x margin below its reproducible boundary.
 const DEFAULT_SAFETY = 0.4;
 
 function lidDrivenCavity() {
