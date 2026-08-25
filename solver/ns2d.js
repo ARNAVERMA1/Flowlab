@@ -366,14 +366,21 @@ function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations, om
     iterations++;
 
     residual = 0;
+    // Negated comparisons so a NaN residual propagates rather than being
+    // skipped - otherwise a diverged field reports residual 0 and
+    // "converged", which is the opposite of the truth.
     for (let m = 0; m < red.length; m++) {
       const r = residualAt(red[m]);
-      if (r > residual) residual = r;
+      if (!(r <= residual)) residual = r;
     }
     for (let m = 0; m < black.length; m++) {
       const r = residualAt(black[m]);
-      if (r > residual) residual = r;
+      if (!(r <= residual)) residual = r;
     }
+    // Bail out rather than grinding to maxIterations on a field that has
+    // already blown up. Turning this into a clear, actionable failure for
+    // the caller is M1's job; reporting it honestly is not optional.
+    if (!Number.isFinite(residual)) break;
     if (residual < residualTol) { converged = true; break; }
   }
 
@@ -545,7 +552,11 @@ export function computeDivergence(grid) {
       if (solid[k]) continue;
       const div = (u[k] - u[idx(i - 1, j)]) / h + (v[k] - v[idx(i, j - 1)]) / h;
       const a = Math.abs(div);
-      if (a > max) max = a;
+      // Negated comparison so NaN propagates instead of being skipped: a
+      // blown-up field must not report divergence of zero. `a > max` is false
+      // for NaN, which silently made an all-NaN field look perfectly
+      // incompressible.
+      if (!(a <= max)) max = a;
       sumSq += div * div;
       count++;
     }

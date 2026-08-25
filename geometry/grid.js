@@ -61,6 +61,26 @@ export class StaggeredGrid {
 // to about one cell, which is the dominant geometric error for a curved
 // obstacle on a uniform grid. Cut-cell or immersed-boundary treatments that
 // would fix that are well beyond M0.
+// Marks every cell whose centre satisfies the predicate as solid. The same
+// staircase caveat as stampCircle applies to any curved region defined this
+// way. This is a primitive for building fixed domains in code - the
+// interactive geometry pipeline is M5 and nothing here anticipates it.
+export function stampWhere(grid, isSolidAt) {
+  const { nx, ny } = grid;
+  let count = 0;
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 1; i <= nx; i++) {
+      const { x, y } = grid.cellCentre(i, j);
+      if (isSolidAt(x, y)) {
+        grid.solid[grid.idx(i, j)] = 1;
+        count++;
+      }
+    }
+  }
+  grid.maskVersion++;
+  return count;
+}
+
 export function stampCircle(grid, cx, cy, radius) {
   const { nx, ny } = grid;
   let count = 0;
