@@ -365,22 +365,28 @@ function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations, om
     sweep(black);
     iterations++;
 
+    // Non-finite residuals are COUNTED, not folded into the maximum. A
+    // negated comparison (`if (!(r <= residual)) residual = r`) looks like it
+    // propagates NaN, but only if the NaN happens to come last: any finite
+    // value after it overwrites the NaN and the solve reports a healthy
+    // residual and "converged" on a field that has already blown up. Counting
+    // separately is the only form of this that cannot be defeated by ordering.
     residual = 0;
-    // Negated comparisons so a NaN residual propagates rather than being
-    // skipped - otherwise a diverged field reports residual 0 and
-    // "converged", which is the opposite of the truth.
+    let nonFiniteResiduals = 0;
     for (let m = 0; m < red.length; m++) {
       const r = residualAt(red[m]);
-      if (!(r <= residual)) residual = r;
+      if (!Number.isFinite(r)) { nonFiniteResiduals++; continue; }
+      if (r > residual) residual = r;
     }
     for (let m = 0; m < black.length; m++) {
       const r = residualAt(black[m]);
-      if (!(r <= residual)) residual = r;
+      if (!Number.isFinite(r)) { nonFiniteResiduals++; continue; }
+      if (r > residual) residual = r;
     }
     // Bail out rather than grinding to maxIterations on a field that has
     // already blown up. Turning this into a clear, actionable failure for
     // the caller is M1's job; reporting it honestly is not optional.
-    if (!Number.isFinite(residual)) break;
+    if (nonFiniteResiduals > 0) { residual = NaN; break; }
     if (residual < residualTol) { converged = true; break; }
   }
 
@@ -543,23 +549,28 @@ export function computeDivergence(grid) {
   const { nx, ny, h, u, v, solid } = grid;
   const idx = idxFor(grid);
 
+  // Non-finite cells are COUNTED, not folded into the maximum. `a > max` skips
+  // NaN outright, so an all-NaN field reported max divergence of exactly zero
+  // and looked perfectly incompressible. The negated form `!(a <= max)` is no
+  // better: it survives only if the NaN happens to be the last value seen, and
+  // any finite cell after it restores a healthy-looking number. Counting is
+  // the only version of this that no ordering can defeat.
   let max = 0;
   let sumSq = 0;
   let count = 0;
+  let nonFiniteCells = 0;
   for (let j = 1; j <= ny; j++) {
     for (let i = 1; i <= nx; i++) {
       const k = idx(i, j);
       if (solid[k]) continue;
       const div = (u[k] - u[idx(i - 1, j)]) / h + (v[k] - v[idx(i, j - 1)]) / h;
+      if (!Number.isFinite(div)) { nonFiniteCells++; continue; }
       const a = Math.abs(div);
-      // Negated comparison so NaN propagates instead of being skipped: a
-      // blown-up field must not report divergence of zero. `a > max` is false
-      // for NaN, which silently made an all-NaN field look perfectly
-      // incompressible.
-      if (!(a <= max)) max = a;
+      if (a > max) max = a;
       sumSq += div * div;
       count++;
     }
   }
-  return { max, rms: count > 0 ? Math.sqrt(sumSq / count) : 0 };
+  if (nonFiniteCells > 0) return { max: NaN, rms: NaN, nonFiniteCells };
+  return { max, rms: count > 0 ? Math.sqrt(sumSq / count) : 0, nonFiniteCells: 0 };
 }

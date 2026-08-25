@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowLab - M0 harness</title>
+<link rel="icon" href="data:,">
+
+<style>
+  :root {
+    --surface: #1a1a19;
+    --panel: #212120;
+    --line: #33332f;
+    --ink: #e8e8e4;
+    --ink-dim: #9a9a92;
+    --accent: #6da7ec;
+    --bad: #ff5c8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--surface); color: var(--ink);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; letter-spacing: .02em; }
+  .sub { color: var(--ink-dim); font-size: 12px; margin-bottom: 18px; }
+  .wrap { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; max-width: 1180px; }
+  .left { flex: 1 1 520px; min-width: 320px; }
+  .right { flex: 0 1 360px; min-width: 300px; }
+
+  #banner {
+    background: #3a1220; border: 1px solid var(--bad); color: #ffc2d3;
+    padding: 10px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 12px;
+  }
+  /* Intrinsic canvas dimensions carry the domain's aspect ratio; capping both
+     axes lets the browser scale it down without distorting the field. */
+  #field {
+    display: block; background: #000;
+    max-width: 100%; max-height: 72vh; width: auto; height: auto;
+    border: 1px solid var(--line); border-radius: 3px;
+    image-rendering: pixelated;
+  }
+  #note { color: var(--ink-dim); font-size: 12px; margin: 8px 0 0; }
+
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  button {
+    font: inherit; color: var(--ink); background: #2b2b29;
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 6px 16px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .38; cursor: default; }
+  select {
+    font: inherit; color: var(--ink); background: #2b2b29;
+    border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px;
+  }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 14px 16px; }
+  .panel + .panel { margin-top: 12px; }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--ink-dim); font-weight: 600; margin: 0 0 10px;
+  }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+  dt { color: var(--ink-dim); white-space: nowrap; }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; word-break: break-word; }
+  dd.bad { color: var(--bad); font-weight: 700; }
+
+  .legend { margin-top: 12px; }
+  #legendbar { height: 10px; border-radius: 2px; border: 1px solid var(--line); }
+  .legend .ends { display: flex; justify-content: space-between; color: var(--ink-dim); font-size: 11px; margin-top: 4px; }
+  .key { display: flex; gap: 14px; margin-top: 10px; color: var(--ink-dim); font-size: 11px; flex-wrap: wrap; }
+  .key span { display: flex; align-items: center; gap: 5px; }
+  .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid #00000060; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>FlowLab &mdash; M0 harness</h1>
+  <div class="sub">2D incompressible Navier&ndash;Stokes &middot; Chorin projection on a MAC staggered grid &middot; velocity magnitude</div>
+
+  <div class="wrap">
+    <div class="left">
+      <div id="banner" hidden></div>
+      <div class="controls">
+        <button id="run">Run</button>
+        <button id="pause">Pause</button>
+        <button id="reset">Reset</button>
+        <select id="scenario" aria-label="Scenario"></select>
+      </div>
+      <canvas id="field"></canvas>
+      <p id="note"></p>
+    </div>
+
+    <div class="right">
+      <div class="panel">
+        <h2>State</h2>
+        <dl>
+          <dt>status</dt><dd id="status">-</dd>
+          <dt>field</dt><dd id="fieldstate">-</dd>
+          <dt>iteration</dt><dd id="iteration">-</dd>
+          <dt>sim time</dt><dd id="time">-</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <h2>Continuity &amp; pressure solve</h2>
+        <dl>
+          <dt>max |&nabla;&middot;u|</dt><dd id="divmax">-</dd>
+          <dt>rms |&nabla;&middot;u|</dt><dd id="divrms">-</dd>
+          <dt>poisson</dt><dd id="poisson">-</dd>
+          <dt>last solve</dt><dd id="poissonits">-</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <h2>Parameters</h2>
+        <dl>
+          <dt>&nu;</dt><dd id="nu">-</dd>
+          <dt>&rho;</dt><dd id="rho">-</dd>
+          <dt>&Delta;t</dt><dd id="dt">-</dd>
+          <dt>grid</dt><dd id="grid">-</dd>
+          <dt>Re</dt><dd id="re">-</dd>
+          <dt>peak speed</dt><dd id="peak">-</dd>
+        </dl>
+        <div class="legend">
+          <div id="legendbar"></div>
+          <div class="ends"><span>0</span><span id="legendmax">-</span></div>
+        </div>
+        <div class="key">
+          <span><i class="sw" style="background:#333331"></i> solid</span>
+          <span><i class="sw" style="background:#ff00aa"></i> not finite</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module">
+  import { Harness } from "./ui/harness.js";
+  const harness = new Harness(document.getElementById("app"));
+  // Exposed so the browser check can drive Run/Pause/Reset and inject a NaN to
+  // confirm the panel reports a broken field rather than a healthy-looking one.
+  window.__flowlab = harness;
+</script>
+</body>
+</html>

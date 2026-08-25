@@ -4,6 +4,7 @@
   "type": "module",
   "description": "FlowLab — M0 numerical proof: 2D incompressible Navier-Stokes on a fixed grid.",
   "scripts": {
-    "test": "node --test tests/*.js"
+    "test": "node --test tests/*.js",
+    "serve": "node scripts/serve.js"
   }
 }
