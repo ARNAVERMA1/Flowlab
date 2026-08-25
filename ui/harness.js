@@ -21,6 +21,7 @@ import { inspectField } from "../physics/fieldStats.js";
 import { VelocityFieldRenderer } from "../visualization/velocityField.js";
 import { rampCss } from "../visualization/colormap.js";
 import { buildScenario, SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
+import { assessField } from "./fieldHealth.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
 
 const STEPS_PER_FRAME = 4;
@@ -121,22 +122,20 @@ export class Harness {
     const { grid } = this.scenario;
     const inspection = inspectField(grid);
     const divergence = computeDivergence(grid);
+    const health = assessField(inspection);
 
     // A field that has stopped being finite is a hard stop, not a warning.
-    if (!inspection.finite && this.state !== "failed") {
+    if (health.halt && this.state !== "failed") {
       this.state = "failed";
       this.stopLoop();
-      const where = inspection.firstNonFinite;
-      this.failure =
-        `${inspection.nonFiniteCells} of ${inspection.fluidCells} fluid cells are not finite` +
-        (where ? `, first at cell (${where.i}, ${where.j})` : "");
+      this.failure = health.message;
     }
 
     this.renderer.render(grid, inspection);
-    this.updateReadouts(inspection, divergence);
+    this.updateReadouts(inspection, divergence, health);
   }
 
-  updateReadouts(inspection, divergence) {
+  updateReadouts(inspection, divergence, health) {
     const { scenario, root } = this;
     const { params, grid } = scenario;
 
@@ -157,13 +156,9 @@ export class Harness {
     set("#divmax", exponential(divergence.max, 2), isBad(divergence.max));
     set("#divrms", exponential(divergence.rms, 2), isBad(divergence.rms));
 
-    // inspection.maxSpeed is the largest speed among the cells that are still
-    // finite, which is what the colour scale needs in order to draw anything at
-    // all. It is NOT a fact about the field once part of the field is broken,
-    // so the panel reports NaN rather than that number: a plausible peak speed
-    // sitting beside a NOT FINITE field state is precisely the mixed message
-    // this panel is supposed to be incapable of sending.
-    const reportedPeak = inspection.finite ? inspection.maxSpeed : NaN;
+    // assessField decides what may be reported; see ui/fieldHealth.js for why
+    // the peak speed is not simply inspection.maxSpeed.
+    const reportedPeak = health.reportedPeakSpeed;
     set("#peak", exponential(reportedPeak, 3), isBad(reportedPeak));
 
     if (this.lastStep === null) {
@@ -179,14 +174,7 @@ export class Harness {
       );
     }
 
-    const finiteBad = !inspection.finite;
-    set(
-      "#fieldstate",
-      finiteBad
-        ? `NOT FINITE - ${inspection.nonFiniteCells} bad cells`
-        : `finite (${integer(inspection.finiteCells)} fluid cells)`,
-      finiteBad
-    );
+    set("#fieldstate", health.fieldSummary, !health.ok);
 
     const banner = root.querySelector("#banner");
     if (this.state === "failed") {
@@ -200,10 +188,10 @@ export class Harness {
     root.querySelector("#run").disabled = this.state !== "paused";
     root.querySelector("#pause").disabled = this.state !== "running";
 
-    this.updateLegend(inspection);
+    this.updateLegend(health);
   }
 
-  updateLegend(inspection) {
+  updateLegend(health) {
     const bar = this.root.querySelector("#legendbar");
     if (!bar.dataset.painted) {
       const stops = [];
@@ -213,7 +201,7 @@ export class Harness {
     }
     // Same rule as the peak readout: a scale drawn from a partly broken field
     // is not a scale anyone should read a value off.
-    const max = inspection.finite ? inspection.maxSpeed : NaN;
+    const max = health.reportedPeakSpeed;
     this.root.querySelector("#legendmax").textContent = exponential(max, 2);
     this.root.querySelector("#legendmax").classList.toggle("bad", isBad(max));
   }
