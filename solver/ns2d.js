@@ -315,100 +315,138 @@ function computeRHS(grid, F, G, dt, rho, rhs) {
   }
 }
 
-// Pressure Poisson solve: red-black Gauss-Seidel with over-relaxation (SOR).
+// Pressure Poisson solve: conjugate gradient.
 //
-// Chosen over plain Jacobi because Jacobi needs O(N^2) iterations to
-// converge on an N x N grid, which is affordable for the trivial cases but
-// not for a driven cavity: measured 19,600 Jacobi iterations per timestep at
-// 64x64, about 3 hours for a single steady-state run. SOR with the optimal
-// relaxation factor needs O(N) instead. Red-black ordering is used because
-// the two colours decouple (every neighbour of a red cell is black), which
-// is what makes the classical optimal-omega theory apply.
+// History, because the choice is only sensible in light of it. Jacobi was
+// first: simplest possible, but O(N^2) iterations - 19,600 per timestep on a
+// 64x64 cavity, about 3 hours for one steady-state run. That was replaced by
+// red-black SOR, which is O(N) at the optimal relaxation factor but needs to
+// be TOLD that factor, and the estimate for it was wrong everywhere:
+//
+//   geometry          measured optimum   formula gave    cost of the error
+//   cavity 64x64      1.930              1.9065          1.70x more iterations
+//   bend 84x84        1.970              1.9279          2.60x
+//   cylinder 168x73   1.970              1.9633          1.14x
+//
+// Deriving the estimate properly does not rescue it. The formula in use came
+// from the Dirichlet Jacobi spectral radius; for the Neumann problem here the
+// slowest convergent mode is [cos(pi/N)+1]/2 rather than
+// [cos(pi/nx)+cos(pi/ny)]/2, which is exactly why every estimate came in low.
+// That correction is exact for the cavity (1.9329 vs 1.930 measured) and still
+// 1.87x off for the bend, because a bounding box says nothing useful about an
+// L-shaped channel whose slowest mode runs the length of the duct. No formula
+// over the grid dimensions can fix that.
+//
+// CG needs no such parameter. The operator is the discrete Laplacian
+// restricted to fluid cells: symmetric, negative semi-definite, with the
+// constant as its only null direction. Measured against the tuning each
+// scenario was actually using:
+//
+//   cavity            313 -> 193 iterations per step
+//   bend              372 -> 232
+//   cylinder          419 -> 321
+//
+// It also cannot be mis-tuned, which SOR emphatically can: omega = 1.99 on the
+// cavity costs 1223 iterations against 184 at the optimum. Trading a small
+// amount of best-case speed for the removal of a parameter that was wrong in
+// every geometry tried is the point of the exercise.
 //
 // Neumann boundaries - domain walls and obstacle surfaces alike - are imposed
-// by dropping the out-of-domain or solid neighbour and reducing the diagonal
-// accordingly. That is algebraically identical to mirroring a ghost cell but
-// needs no ghost update inside the sweep, which matters here because with
-// red-black ordering a boundary cell's mirrored ghost has the same colour as
-// the cell itself. It also makes obstacles fall out for free: a solid
-// neighbour is dropped exactly like a wall.
+// by dropping the out-of-domain or solid neighbour and reducing the diagonal,
+// which is algebraically identical to mirroring a ghost cell. Obstacles fall
+// out for free: a solid neighbour is dropped exactly like a wall.
 //
-// The pure-Neumann system is singular (defined up to an additive constant);
-// we pin it by zero-meaning the result over the fluid cells.
-function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations, omega }) {
-  const { nx, ny, h, p } = grid;
+// The system is singular (defined up to an additive constant). The residual is
+// projected to zero mean every iteration so roundoff cannot excite the null
+// direction, and the result is zero-meaned at the end.
+function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations }) {
+  const { h, p } = grid;
   const h2 = h * h;
-  const w = omega ?? 2 / (1 + Math.sin(Math.PI / Math.max(nx, ny)));
-  const { red, black, offsets, counts } = cells;
+  const { fluid, offsets, counts, work } = cells;
+  const n = fluid.length;
+  const { r, d, Ad } = work;
 
-  let iterations = 0;
-  let residual = Infinity;
-  let converged = false;
-
-  const sweep = (list) => {
-    for (let m = 0; m < list.length; m++) {
-      const k = list[m];
-      const n = counts[k];
-      if (n === 0) continue;
+  const applyA = (src, dst) => {
+    for (let m = 0; m < n; m++) {
+      const k = fluid[m];
+      const c = counts[k];
+      if (c === 0) { dst[k] = 0; continue; }
       let sum = 0;
       const base = k * 4;
-      for (let d = 0; d < 4; d++) {
-        const o = offsets[base + d];
-        if (o !== 0) sum += p[k + o];
+      for (let q = 0; q < 4; q++) {
+        const o = offsets[base + q];
+        if (o !== 0) sum += src[k + o];
       }
-      p[k] += w * ((sum - h2 * rhs[k]) / n - p[k]);
+      dst[k] = (sum - c * src[k]) / h2;
     }
   };
 
-  while (iterations < maxIterations) {
-    sweep(red);
-    sweep(black);
+  const projectToZeroMean = (a) => {
+    let total = 0;
+    for (let m = 0; m < n; m++) total += a[fluid[m]];
+    const mean = total / n;
+    for (let m = 0; m < n; m++) a[fluid[m]] -= mean;
+  };
+
+  const dot = (a, b) => {
+    let total = 0;
+    for (let m = 0; m < n; m++) { const k = fluid[m]; total += a[k] * b[k]; }
+    return total;
+  };
+
+  // Non-finite entries are COUNTED, never folded into a maximum by comparison.
+  // `v > mx` is false for NaN and would report a healthy residual on a field
+  // that has already blown up; so would `!(v <= mx)`, which survives only if
+  // the NaN happens to come last. See tests/regression_nonfinite_reporting.js.
+  const maxAbs = (a) => {
+    let mx = 0;
+    let bad = 0;
+    for (let m = 0; m < n; m++) {
+      const v = Math.abs(a[fluid[m]]);
+      if (!Number.isFinite(v)) { bad++; continue; }
+      if (v > mx) mx = v;
+    }
+    return bad > 0 ? NaN : mx;
+  };
+
+  if (n === 0) return { iterations: 0, residual: 0, converged: true };
+
+  applyA(p, Ad);
+  for (let m = 0; m < n; m++) { const k = fluid[m]; r[k] = rhs[k] - Ad[k]; }
+  projectToZeroMean(r);
+  for (let m = 0; m < n; m++) d[fluid[m]] = r[fluid[m]];
+  let rr = dot(r, r);
+
+  let iterations = 0;
+  let residual = maxAbs(r);
+  let converged = Number.isFinite(residual) && residual < residualTol;
+
+  while (!converged && iterations < maxIterations) {
+    if (!Number.isFinite(residual)) break;
+    applyA(d, Ad);
+    const dAd = dot(d, Ad);
+    if (!Number.isFinite(dAd) || dAd === 0) { residual = NaN; break; }
+
+    const alpha = rr / dAd;
+    for (let m = 0; m < n; m++) {
+      const k = fluid[m];
+      p[k] += alpha * d[k];
+      r[k] -= alpha * Ad[k];
+    }
+    projectToZeroMean(r);
+
+    const rrNext = dot(r, r);
     iterations++;
-
-    // Non-finite residuals are COUNTED, not folded into the maximum. A
-    // negated comparison (`if (!(r <= residual)) residual = r`) looks like it
-    // propagates NaN, but only if the NaN happens to come last: any finite
-    // value after it overwrites the NaN and the solve reports a healthy
-    // residual and "converged" on a field that has already blown up. Counting
-    // separately is the only form of this that cannot be defeated by ordering.
-    residual = 0;
-    let nonFiniteResiduals = 0;
-    for (let m = 0; m < red.length; m++) {
-      const r = residualAt(red[m]);
-      if (!Number.isFinite(r)) { nonFiniteResiduals++; continue; }
-      if (r > residual) residual = r;
-    }
-    for (let m = 0; m < black.length; m++) {
-      const r = residualAt(black[m]);
-      if (!Number.isFinite(r)) { nonFiniteResiduals++; continue; }
-      if (r > residual) residual = r;
-    }
-    // Bail out rather than grinding to maxIterations on a field that has
-    // already blown up. Turning this into a clear, actionable failure for
-    // the caller is M1's job; reporting it honestly is not optional.
-    if (nonFiniteResiduals > 0) { residual = NaN; break; }
+    residual = maxAbs(r);
+    if (!Number.isFinite(residual)) break;
     if (residual < residualTol) { converged = true; break; }
+
+    const beta = rrNext / rr;
+    for (let m = 0; m < n; m++) { const k = fluid[m]; d[k] = r[k] + beta * d[k]; }
+    rr = rrNext;
   }
 
-  function residualAt(k) {
-    const n = counts[k];
-    if (n === 0) return 0;
-    let sum = 0;
-    const base = k * 4;
-    for (let d = 0; d < 4; d++) {
-      const o = offsets[base + d];
-      if (o !== 0) sum += p[k + o];
-    }
-    return Math.abs((sum - n * p[k]) / h2 - rhs[k]);
-  }
-
-  let sum = 0;
-  const total = red.length + black.length;
-  for (let m = 0; m < red.length; m++) sum += p[red[m]];
-  for (let m = 0; m < black.length; m++) sum += p[black[m]];
-  const mean = total > 0 ? sum / total : 0;
-  for (let m = 0; m < red.length; m++) p[red[m]] -= mean;
-  for (let m = 0; m < black.length; m++) p[black[m]] -= mean;
+  projectToZeroMean(p);
 
   return { iterations, residual, converged };
 }
@@ -465,8 +503,7 @@ function scratchFor(grid) {
   // condition) and how many there are.
   const offsets = new Int32Array(size * 4);
   const counts = new Uint8Array(size);
-  const red = [];
-  const black = [];
+  const fluid = [];
   for (let j = 1; j <= ny; j++) {
     for (let i = 1; i <= nx; i++) {
       const k = idx(i, j);
@@ -478,7 +515,7 @@ function scratchFor(grid) {
       if (j > 1 && !solid[k - stride]) { offsets[base + 2] = -stride; n++; }
       if (j < ny && !solid[k + stride]) { offsets[base + 3] = stride; n++; }
       counts[k] = n;
-      ((i + j) & 1 ? black : red).push(k);
+      fluid.push(k);
     }
   }
 
@@ -487,7 +524,17 @@ function scratchFor(grid) {
     G: new Float64Array(size),
     rhs: new Float64Array(size),
     maskVersion: grid.maskVersion,
-    cells: { red: Int32Array.from(red), black: Int32Array.from(black), offsets, counts },
+    cells: {
+      fluid: Int32Array.from(fluid),
+      offsets,
+      counts,
+      // CG work vectors, allocated once per grid rather than per timestep.
+      work: {
+        r: new Float64Array(size),
+        d: new Float64Array(size),
+        Ad: new Float64Array(size),
+      },
+    },
   };
   scratchByGrid.set(grid, s);
   return s;
@@ -509,7 +556,6 @@ export function step(grid, bc, params) {
     fy = 0,
     divergenceTol = 1e-8,
     poissonMaxIterations = 5000,
-    omega,
   } = params;
 
   const { F, G, rhs, cells } = scratchFor(grid);
@@ -528,7 +574,6 @@ export function step(grid, bc, params) {
   const poisson = solvePressurePoisson(grid, rhs, cells, {
     residualTol: (divergenceTol * rho) / dt,
     maxIterations: poissonMaxIterations,
-    omega,
   });
   correctVelocities(grid, F, G, dt, rho);
 
