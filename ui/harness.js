@@ -1,4 +1,4 @@
-// M0 harness: Run / Pause / Reset, a velocity-magnitude colour map, and the
+// Solver harness: Run / Pause / Reset, a velocity-magnitude colour map, and the
 // raw numbers behind it.
 //
 // This layer drives the solver and reads its output. It never reaches into the
@@ -17,6 +17,7 @@
 //      can never be mistaken for a live one.
 
 import { step, computeDivergence } from "../solver/ns2d.js";
+import { computeStableTimestep, SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { VelocityFieldRenderer } from "../visualization/velocityField.js";
 import { rampCss } from "../visualization/colormap.js";
@@ -36,6 +37,7 @@ export class Harness {
     this.iteration = 0;
     this.simulatedTime = 0;
     this.lastStep = null;
+    this.lastTimestep = null;
     this.failure = null;
     this.frame = null;
 
@@ -76,6 +78,7 @@ export class Harness {
     this.iteration = 0;
     this.simulatedTime = 0;
     this.lastStep = null;
+    this.lastTimestep = null;
     this.failure = null;
     this.state = "paused";
 
@@ -104,14 +107,33 @@ export class Harness {
 
   tick() {
     if (this.state !== "running") return;
-    const { grid, bc, params } = this.scenario;
+    const { grid, bc, params, timestep } = this.scenario;
     const started = performance.now();
 
-    for (let n = 0; n < STEPS_PER_FRAME; n++) {
-      this.lastStep = step(grid, bc, params);
-      this.iteration++;
-      this.simulatedTime += params.dt;
-      if (performance.now() - started > FRAME_BUDGET_MS) break;
+    // The timestep is chosen from the field before every step, not fixed for
+    // the run. A stability failure is an exception, not a status code, so it
+    // is caught here and turned into the same hard stop as a non-finite field.
+    try {
+      for (let n = 0; n < STEPS_PER_FRAME; n++) {
+        const selection = computeStableTimestep(grid, {
+          nu: params.nu,
+          safety: timestep.safety,
+          previousTimestep: this.lastTimestep,
+        });
+        this.lastTimestep = selection.dt;
+        this.lastSelection = selection;
+        this.lastStep = step(grid, bc, { ...params, dt: selection.dt });
+        this.iteration++;
+        this.simulatedTime += selection.dt;
+        if (performance.now() - started > FRAME_BUDGET_MS) break;
+      }
+    } catch (error) {
+      if (!(error instanceof SolverStabilityError)) throw error;
+      this.state = "failed";
+      this.stopLoop();
+      this.failure = error.message;
+      this.draw();
+      return;
     }
 
     this.draw();
@@ -147,7 +169,10 @@ export class Harness {
 
     set("#nu", exponential(params.nu, 3));
     set("#rho", fixed(params.rho, 1));
-    set("#dt", exponential(params.dt, 3));
+    const sel = this.lastSelection;
+    set("#dt", sel ? exponential(sel.dt, 3) : "chosen per step");
+    set("#cfl", sel ? `${fixed(sel.cflNumber, 3)} / ${fixed(sel.diffusionNumber, 3)}` : "-");
+    set("#dtlimit", sel ? sel.limitedBy : "-");
     set("#grid", `${grid.nx} x ${grid.ny}  (h = ${exponential(grid.h, 2)})`);
     set("#re", integer(scenario.Re));
     set("#iteration", integer(this.iteration));

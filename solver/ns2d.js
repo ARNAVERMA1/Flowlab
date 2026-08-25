@@ -40,6 +40,8 @@
 // two solid cells lies inside the body; a face between a solid and a fluid
 // cell lies exactly on the body surface. See applySolidBoundaryConditions.
 
+import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
+
 function idxFor(grid) {
   const { stride } = grid;
   return (i, j) => i + stride * j;
@@ -560,6 +562,13 @@ export function step(grid, bc, params) {
 
   const { F, G, rhs, cells } = scratchFor(grid);
 
+  // Reject a timestep this field cannot survive, before doing any work. If the
+  // field arrived already non-finite this returns rather than throwing: step()
+  // reports on what it was handed, and throws only for what it would itself
+  // produce. The existing non-finite reporting path covers the former.
+  const entryLimits = assertTimestepIsStable(grid, nu, dt);
+  const enteredFinite = entryLimits.finite;
+
   applyBoundaryConditions(grid, bc);
 
   // Seed the whole intermediate field from the current velocity so that every
@@ -580,6 +589,24 @@ export function step(grid, bc, params) {
   // Only the pressure ghosts are refreshed here. The velocity boundary values
   // already came through F,G and must not be re-derived - see correctVelocities.
   applyPressureBoundaryConditions(grid);
+
+  // Backstop. The pre-step check is necessary but not sufficient: it bounds the
+  // timestep against the field as it stands, and a sharp geometric corner can
+  // still produce something non-finite within the step. If the field was sound
+  // on entry and is not on exit, this step broke it and that is worth an
+  // exception rather than a value nobody reads.
+  if (enteredFinite) {
+    const exit = peakCellSpeed(grid);
+    if (!exit.finite) {
+      throw new SolverStabilityError(
+        `the velocity field became non-finite during this step: ${exit.nonFiniteCells} cells. ` +
+        `The timestep passed the stability limits for the field at the start of the step, so ` +
+        `this is a local blow-up rather than a global CFL violation - most often a singular ` +
+        `corner or a badly resolved obstacle boundary.`,
+        { reason: "became-non-finite", nonFiniteCells: exit.nonFiniteCells, dt }
+      );
+    }
+  }
 
   return {
     poissonIterations: poisson.iterations,

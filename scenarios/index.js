@@ -12,13 +12,18 @@
 
 import { StaggeredGrid, stampCircle, stampWhere } from "../geometry/grid.js";
 
-// Timestep from the explicit stability limits of the scheme: the diffusive
-// limit nu*dt/h^2 < 1/4 and the convective limit |u|*dt/h < 1, with a safety
-// factor and an allowance for the flow accelerating above the inlet speed.
-// Adaptive timestep control is M1; this picks a safe fixed value and reports it.
-function stableTimestep(h, nu, peakSpeed, safety) {
-  return safety * Math.min((0.25 * h * h) / nu, h / peakSpeed);
-}
+// Scenarios no longer carry a timestep. The driver calls
+// solver/stability.js computeStableTimestep every step and sizes dt from the
+// field as it actually is, which is what M1 replaced the hand-picked values
+// with. What a scenario supplies instead is the safety factor - the fraction
+// of the hard stability limit it is willing to use.
+//
+// 0.4 is the default and is measured, not guessed. Walking the factor up until
+// each scenario diverges: the cavity survives 0.95, and the sharp bend is
+// stable to 0.6 and blows up at 0.8 - not on a CFL violation, but locally at
+// the mitre corner, which the linearised limit does not describe. 0.4 leaves
+// 1.5x margin below the tightest observed boundary.
+const DEFAULT_SAFETY = 0.4;
 
 function lidDrivenCavity() {
   const n = 64;
@@ -38,7 +43,8 @@ function lidDrivenCavity() {
       bottom: { type: "wall" },
       top: { type: "wall", u: U },
     },
-    params: { nu, rho: 1, dt: stableTimestep(h, nu, U, 0.65), divergenceTol: 1e-7 },
+    params: { nu, rho: 1, divergenceTol: 1e-7 },
+    timestep: { safety: DEFAULT_SAFETY },
     Re,
   };
 }
@@ -72,7 +78,8 @@ function cylinderInChannel() {
       top: { type: "freeSlip" },
       bottom: { type: "freeSlip" },
     },
-    params: { nu, rho: 1, dt: stableTimestep(h, nu, 2 * U, 0.6), divergenceTol: 1e-7, omega: 1.97 },
+    params: { nu, rho: 1, divergenceTol: 1e-7 },
+    timestep: { safety: DEFAULT_SAFETY },
     Re,
   };
 }
@@ -118,9 +125,12 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }) {
       top: { type: "wall" },
       bottom: { type: "outflow" },
     },
-    // 4*U0 rather than 2*U0: the flow accelerates to about 2.9*U0 through the
-    // bend, and sizing against 2*U0 puts CFL at 0.86 and diverges.
-    params: { nu, rho: 1, dt: stableTimestep(h, nu, 4 * U, 0.3), divergenceTol: 1e-7, omega: 1.97 },
+    // The old fixed value here had to guess the peak speed through the bend and
+    // got it wrong: sizing against 2*U0 put CFL at 0.86 once the corner jet
+    // formed and the run diverged, because the flow reaches about 2.9*U0.
+    // Nothing is guessed now - the driver measures it every step.
+    params: { nu, rho: 1, divergenceTol: 1e-7 },
+    timestep: { safety: DEFAULT_SAFETY },
     Re,
   };
 }

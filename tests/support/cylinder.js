@@ -26,7 +26,24 @@ export function runCylinderToSteadyState({
   rho = 1,
   dtSafety = 0.6,
   steadyTol = 1e-5,
-  divergenceTol = 1e-7,
+  // 1e-9 rather than the 1e-7 used elsewhere, because this scenario asserts
+  // that a mirror-symmetric problem gives a mirror-symmetric answer.
+  //
+  // Under the previous red-black SOR pressure solve that assertion was free:
+  // SOR is a stationary iteration whose colouring is itself mirror-symmetric
+  // when the row count is odd, so symmetry held to 2e-15 no matter how loosely
+  // it converged. Conjugate gradient has no such structural guarantee - its
+  // symmetry is only as good as its convergence, and it leaves asymmetric
+  // error at the tolerance level on every step. The Re=40 wake sits just under
+  // the shedding threshold near Re=47 and accumulates that error rather than
+  // damping it: 1.7e-10 by step 200, 1.0e-7 by step 1200.
+  //
+  // Measured here: 1e-7 gives asymmetry 3.9e-8 (fails), 1e-8 gives 3.2e-9
+  // (fails), 1e-9 gives 5.4e-11 - an 18x margin against the unchanged 1e-9
+  // assertion - and 1e-10 gives 4.3e-12. Divergence improves from 9.4e-8 to
+  // 9.5e-10 at the same time. This changes how well the simulation converges,
+  // not what counts as passing.
+  divergenceTol = 1e-9,
   omega = 1.97,
   maxTime = 400,
 }) {

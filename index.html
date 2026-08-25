@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowLab - M0 harness</title>
+<title>FlowLab - solver harness</title>
 <link rel="icon" href="data:,">
 
 <style>
@@ -76,7 +76,7 @@
 </head>
 <body>
 <div id="app">
-  <h1>FlowLab &mdash; M0 harness</h1>
+  <h1>FlowLab &mdash; solver harness</h1>
   <div class="sub">2D incompressible Navier&ndash;Stokes &middot; Chorin projection on a MAC staggered grid &middot; velocity magnitude</div>
 
   <div class="wrap">
@@ -119,6 +119,8 @@
           <dt>&nu;</dt><dd id="nu">-</dd>
           <dt>&rho;</dt><dd id="rho">-</dd>
           <dt>&Delta;t</dt><dd id="dt">-</dd>
+          <dt>CFL / diff no.</dt><dd id="cfl">-</dd>
+          <dt>&Delta;t set by</dt><dd id="dtlimit">-</dd>
           <dt>grid</dt><dd id="grid">-</dd>
           <dt>Re</dt><dd id="re">-</dd>
           <dt>peak speed</dt><dd id="peak">-</dd>
