@@ -107,6 +107,22 @@ test("M2 - every reference declares a verification level and a note", () => {
   );
 });
 
+test("M2 - an unverified reference must say what closing it would take", () => {
+  // "unverified" has to stay a piece of open work, not a permanent shrug. The
+  // distinction this enforces is one the cylinder reference walked into: its
+  // citation was checked and found real, correctly attributed, and genuinely
+  // the standard source - and none of that verified the numbers attached to
+  // it. A blocker naming what is actually missing is what stops a confirmed
+  // citation from being mistaken for a confirmed value.
+  for (const reference of Object.values(REFERENCES)) {
+    if (reference.verification !== "unverified") continue;
+    assert.ok(
+      reference.blocker?.length > 40,
+      `${reference.id} is unverified but does not say what closing it would require`
+    );
+  }
+});
+
 test("M2 - a case resting on an unverified reference must carry a caveat", () => {
   // Unverified references are allowed - not everything can be checked at once -
   // but a case cannot rest on one silently. The Ghia tables sat unverified for

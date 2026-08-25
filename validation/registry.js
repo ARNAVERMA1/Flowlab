@@ -40,6 +40,15 @@
 //                    against an independent source.
 //   unverified       Recalled or single-sourced. Believed correct, not checked.
 //
+// The level describes the NUMBERS, not the citation. Confirming that a cited
+// paper is real, correctly attributed and genuinely the standard source does
+// not verify the values attached to it, and a reference in that state is
+// arguably more dangerous than an obviously unsourced one: the citation reads
+// as authority the numbers have not earned. An unverified reference must
+// therefore also declare `blocker` - what closing it would actually take - so
+// that "unverified" is a piece of work someone can pick up rather than a
+// permanent shrug.
+//
 // The third label is not decoration. The Ghia tables sat at "unverified" for
 // most of this project's life and turned out to contain one wrong digit that
 // was materially changing a reported error. Anything still carrying that label
@@ -96,13 +105,25 @@ export const REFERENCES = {
       "Tritton (1959), J. Fluid Mech. 6, 547-567.",
     verification: "unverified",
     verificationNote:
-      "RECALLED, NOT CHECKED. These values and the citations attached to them " +
-      "have not been cross-referenced against the papers or any independent " +
-      "source. Published values differ by a few percent between sources " +
-      "anyway (2.24 to 2.35 at Re=40 is commonly quoted), which is part of why " +
-      "the test asserts a band rather than a point. Now that the Ghia tables " +
-      "are verified, this is the weakest reference in the project, and it is " +
-      "the obvious next thing to check.",
+      "THE NUMBERS ARE STILL RECALLED, NOT CHECKED. A partial check has since " +
+      "confirmed the citation but not the values. Coutanceau & Bouard (1977), " +
+      "J. Fluid Mech. 79, is a real paper, correctly attributed here, and is " +
+      "the standard experimental benchmark that numerical work compares against " +
+      "for cylinder wake length at Re < 40 - so the attribution is sound. What " +
+      "could not be obtained is the part this project actually depends on: the " +
+      "figures L/D ~ 0.93 at Re=20 and ~2.3 at Re=40 still come from recall, " +
+      "not from any source that could be checked. That is why this stays " +
+      "`unverified` rather than being upgraded on the strength of the citation. " +
+      "Published values also differ by a few percent between sources (2.24 to " +
+      "2.35 at Re=40 is commonly quoted), which is part of why the test asserts " +
+      "a band rather than a point. This remains the weakest reference in the " +
+      "project.",
+    blocker:
+      "The 1977 paper is paywalled and its table could not be reached from any " +
+      "openly available source. Closing this needs either institutional or " +
+      "library access to the original, or a secondary paper that digitises and " +
+      "reproduces those exact figures. Recorded as a known limitation and left " +
+      "open deliberately, not pursued further.",
   },
 };
 
@@ -185,9 +206,12 @@ export const CASES = [
       "through every cut, a symmetric answer to a symmetric problem) hold to " +
       "roundoff and are what the case mostly rests on.",
     caveat:
-      "The reference values behind this case are UNVERIFIED. The agreement is " +
-      "also indirect - it is a trend toward the published number under reducing " +
-      "blockage, not a direct match at a stated condition.",
+      "The reference VALUES behind this case are UNVERIFIED. The citation has " +
+      "been confirmed as real, correctly attributed and the standard source for " +
+      "this measurement, but the specific numbers attributed to it have not " +
+      "been checked against it. The agreement is also indirect - it is a trend " +
+      "toward the published number under reducing blockage, not a direct match " +
+      "at a stated condition.",
     claims: [
       { quantity: "wake L/D at Re=20, 6% blockage", reference: 0.93, tolerance: 0.15, relative: true, referenceType: "published" },
       { quantity: "separation onset below Re~5", reference: 0, tolerance: 0, referenceType: "published" },

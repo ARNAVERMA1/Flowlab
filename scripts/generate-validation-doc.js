@@ -215,8 +215,14 @@ async function main() {
     lines.push(
       `**${unverified.length} reference${unverified.length === 1 ? " is" : "s are"} still unverified** ` +
       `(${unverified.map((r) => r.id).join(", ")}). Any claim resting on ${unverified.length === 1 ? "it" : "them"} ` +
-      "is weaker than the rest of this document, and should be read that way."
+      "is weaker than the rest of this document, and should be read that way. " +
+      "Each one records what closing it would take, so it stays a piece of open " +
+      "work rather than a permanent disclaimer:"
     );
+    lines.push("");
+    for (const reference of unverified) {
+      lines.push(`- **${reference.id}** — ${reference.blocker ?? "no blocker recorded."}`);
+    }
     lines.push("");
   }
 
