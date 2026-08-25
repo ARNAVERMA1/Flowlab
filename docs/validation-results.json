@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-25 16:31:59 UTC",
+  "generatedAt": "2026-08-25 17:02:16 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -161,7 +161,7 @@
         "citation": "Steady recirculation length behind a circular cylinder in unbounded flow, L/D ~ 0.93 at Re=20 and ~2.3 at Re=40. Usually attributed to Coutanceau & Bouard (1977), J. Fluid Mech. 79(2), 231-256, and to Tritton (1959), J. Fluid Mech. 6, 547-567.",
         "verification": "unverified"
       },
-      "caveat": "The reference values behind this case are UNVERIFIED. The agreement is also indirect - it is a trend toward the published number under reducing blockage, not a direct match at a stated condition.",
+      "caveat": "The reference VALUES behind this case are UNVERIFIED. The citation has been confirmed as real, correctly attributed and the standard source for this measurement, but the specific numbers attributed to it have not been checked against it. The agreement is also indirect - it is a trend toward the published number under reducing blockage, not a direct match at a stated condition.",
       "measuredBy": "tests/test5_flow_around_obstacle.js",
       "claims": [
         {

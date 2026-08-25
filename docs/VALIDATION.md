@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-25 16:31:59 UTC.
+Generated 2026-08-25 17:02:16 UTC.
 
 ## How to read this
 
@@ -117,9 +117,9 @@ Wake length compared against published values for an unbounded cylinder, which r
 
 **Verification:** **recalled, not checked**
 
-> RECALLED, NOT CHECKED. These values and the citations attached to them have not been cross-referenced against the papers or any independent source. Published values differ by a few percent between sources anyway (2.24 to 2.35 at Re=40 is commonly quoted), which is part of why the test asserts a band rather than a point. Now that the Ghia tables are verified, this is the weakest reference in the project, and it is the obvious next thing to check.
+> THE NUMBERS ARE STILL RECALLED, NOT CHECKED. A partial check has since confirmed the citation but not the values. Coutanceau & Bouard (1977), J. Fluid Mech. 79, is a real paper, correctly attributed here, and is the standard experimental benchmark that numerical work compares against for cylinder wake length at Re < 40 - so the attribution is sound. What could not be obtained is the part this project actually depends on: the figures L/D ~ 0.93 at Re=20 and ~2.3 at Re=40 still come from recall, not from any source that could be checked. That is why this stays `unverified` rather than being upgraded on the strength of the citation. Published values also differ by a few percent between sources (2.24 to 2.35 at Re=40 is commonly quoted), which is part of why the test asserts a band rather than a point. This remains the weakest reference in the project.
 
-> ⚠️ **Caveat.** The reference values behind this case are UNVERIFIED. The agreement is also indirect - it is a trend toward the published number under reducing blockage, not a direct match at a stated condition.
+> ⚠️ **Caveat.** The reference VALUES behind this case are UNVERIFIED. The citation has been confirmed as real, correctly attributed and the standard source for this measurement, but the specific numbers attributed to it have not been checked against it. The agreement is also indirect - it is a trend toward the published number under reducing blockage, not a direct match at a stated condition.
 
 | quantity | reference | measured | tolerance | result |
 |---|---|---|---|---|
@@ -164,4 +164,6 @@ Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
 - Obstacles are staircase-resolved to about one cell.
 - The explicit viscous limit scales as h², so refinement gets expensive quickly.
 
-**1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way.
+**1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
+
+- **cylinderWakeLength** — The 1977 paper is paywalled and its table could not be reached from any openly available source. Closing this needs either institutional or library access to the original, or a secondary paper that digitises and reproduces those exact figures. Recorded as a known limitation and left open deliberately, not pursued further.
