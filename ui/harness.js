@@ -23,6 +23,7 @@ import { VelocityFieldRenderer } from "../visualization/velocityField.js";
 import { rampCss } from "../visualization/colormap.js";
 import { buildScenario, SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
 import { assessField } from "./fieldHealth.js";
+import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
 
 const STEPS_PER_FRAME = 4;
@@ -41,8 +42,12 @@ export class Harness {
     this.failure = null;
     this.frame = null;
 
+    this.validation = new ValidationPanel(root);
     this.bindControls();
     this.load(this.scenarioId);
+    // The validation record is fetched asynchronously; re-render once it lands
+    // so the panel stops saying "loading" and starts showing measurements.
+    this.validation.load().then(() => this.validation.render(this.scenarioId));
   }
 
   bindControls() {
@@ -89,6 +94,7 @@ export class Harness {
     canvas.height = grid.ny * scale;
 
     this.root.querySelector("#note").textContent = this.scenario.note;
+    this.validation.render(id);
     this.draw();
   }
 

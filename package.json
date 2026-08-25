@@ -2,9 +2,10 @@
   "name": "flowlab",
   "private": true,
   "type": "module",
-  "description": "FlowLab — M0 numerical proof: 2D incompressible Navier-Stokes on a fixed grid.",
+  "description": "FlowLab - 2D incompressible Navier-Stokes solver with a validated benchmark suite.",
   "scripts": {
     "test": "node --test tests/*.js",
-    "serve": "node scripts/serve.js"
+    "serve": "node scripts/serve.js",
+    "validate": "node scripts/generate-validation-doc.js"
   }
 }

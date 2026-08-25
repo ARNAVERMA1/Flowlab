@@ -72,6 +72,17 @@
   .key { display: flex; gap: 14px; margin-top: 10px; color: var(--ink-dim); font-size: 11px; flex-wrap: wrap; }
   .key span { display: flex; align-items: center; gap: 5px; }
   .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid #00000060; }
+
+  .good { color: #7fd18b; } .partial { color: #e0c46c; } .bad { color: var(--bad); }
+  dd.good, dd.partial, dd.bad { font-weight: 700; }
+  .vtable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+  .vtable th { text-align: left; color: var(--ink-dim); font-weight: 600; padding: 2px 0; }
+  .vtable th:nth-child(n+2), .vtable td.num { text-align: right; }
+  .vtable td { padding: 2px 0; vertical-align: top; }
+  .vtable td:not(:first-child) { padding-left: 10px; white-space: nowrap; }
+  .vtable .dim { color: var(--ink-dim); }
+  .vnote { color: var(--ink-dim); font-size: 11px; margin: 8px 0 0; line-height: 1.45; }
+  .vnote.bad { color: #ffc2d3; }
 </style>
 </head>
 <body>
@@ -101,6 +112,17 @@
           <dt>iteration</dt><dd id="iteration">-</dd>
           <dt>sim time</dt><dd id="time">-</dd>
         </dl>
+      </div>
+
+      <div class="panel">
+        <h2>Validation</h2>
+        <dl>
+          <dt>status</dt><dd id="vclass">-</dd>
+          <dt>meaning</dt><dd id="vmeans">-</dd>
+          <dt>reference</dt><dd id="vref">-</dd>
+          <dt>reference is</dt><dd id="vrefstatus">-</dd>
+        </dl>
+        <div id="vdetail"></div>
       </div>
 
       <div class="panel">

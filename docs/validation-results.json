@@ -1,0 +1,282 @@
+{
+  "generatedAt": "2026-08-25 16:31:59 UTC",
+  "cases": {
+    "still-water": {
+      "label": "Still water",
+      "classification": "self-validated",
+      "reference": null,
+      "caveat": null,
+      "measuredBy": "tests/test1_still_water.js",
+      "claims": [
+        {
+          "quantity": "max|u| after 50 steps",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 1e-10,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "max|div u|",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 1e-10,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "uniform-channel": {
+      "label": "Uniform channel flow",
+      "classification": "self-validated",
+      "reference": null,
+      "caveat": null,
+      "measuredBy": "tests/test2_channel_flow.js",
+      "claims": [
+        {
+          "quantity": "max|u - U0|",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0.000001,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "max|div u|",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0.000001,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "viscous-diffusion": {
+      "label": "Viscous diffusion",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "analyticalDiffusion",
+        "citation": "Closed-form solutions of the 1D heat equation: the decaying mode u = U0*cos(k*y)*exp(-nu*k^2*t) and the spreading error-function layer u = (U0/2)(1 + erf((y-y0)/(2*sqrt(nu*t)))).",
+        "verification": "derived"
+      },
+      "caveat": null,
+      "measuredBy": "tests/test3_viscous_diffusion.js",
+      "claims": [
+        {
+          "quantity": "decay rate vs nu*k^2 (relative)",
+          "reference": 0,
+          "measured": 0.0007635153415381052,
+          "tolerance": 0.001,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "spatial convergence order",
+          "reference": 2,
+          "measured": 2.053484529427615,
+          "tolerance": 0.3,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "spreading-layer profile error",
+          "reference": 0,
+          "measured": 0.00004961688701701772,
+          "tolerance": 0.0002,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        }
+      ]
+    },
+    "lid-driven-cavity": {
+      "label": "Lid-driven cavity",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "ghia1982",
+        "citation": "Ghia, U., Ghia, K. N., & Shin, C. T. (1982). High-Re solutions for incompressible flow using the Navier-Stokes equations and a multigrid method. Journal of Computational Physics, 48(3), 387-411.",
+        "verification": "verified"
+      },
+      "caveat": null,
+      "measuredBy": "tests/test4_lid_driven_cavity.js",
+      "claims": [
+        {
+          "quantity": "max|u - Ghia| at Re=100",
+          "reference": 0,
+          "measured": 0.003801914606736262,
+          "tolerance": 0.015,
+          "relative": false,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "max|v - Ghia| at Re=100",
+          "reference": 0,
+          "measured": 0.008545232569153544,
+          "tolerance": 0.015,
+          "relative": false,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "max|u - Ghia| at Re=400",
+          "reference": 0,
+          "measured": 0.00733363435528539,
+          "tolerance": 0.015,
+          "relative": false,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "max|u - Ghia| at Re=1000",
+          "reference": 0,
+          "measured": 0.017895479397926295,
+          "tolerance": 0.035,
+          "relative": false,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "self-convergence order",
+          "reference": 2,
+          "measured": 1.9053784264666385,
+          "tolerance": 0.3,
+          "relative": false,
+          "referenceType": "self-convergence",
+          "result": "pass"
+        }
+      ]
+    },
+    "cylinder-wake": {
+      "label": "Flow past a circular cylinder",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "cylinderWakeLength",
+        "citation": "Steady recirculation length behind a circular cylinder in unbounded flow, L/D ~ 0.93 at Re=20 and ~2.3 at Re=40. Usually attributed to Coutanceau & Bouard (1977), J. Fluid Mech. 79(2), 231-256, and to Tritton (1959), J. Fluid Mech. 6, 547-567.",
+        "verification": "unverified"
+      },
+      "caveat": "The reference values behind this case are UNVERIFIED. The agreement is also indirect - it is a trend toward the published number under reducing blockage, not a direct match at a stated condition.",
+      "measuredBy": "tests/test5_flow_around_obstacle.js",
+      "claims": [
+        {
+          "quantity": "wake L/D at Re=20, 6% blockage",
+          "reference": 0.93,
+          "measured": 1.0331842587154236,
+          "tolerance": 0.15,
+          "relative": true,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "separation onset below Re~5",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
+          "relative": false,
+          "referenceType": "published",
+          "result": "pass"
+        },
+        {
+          "quantity": "velocity on the body surface",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "flux deviation through all cuts (relative)",
+          "reference": 0,
+          "measured": 2.5265971627811027e-10,
+          "tolerance": 1e-7,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "centreline asymmetry",
+          "reference": 0,
+          "measured": 5.38841957165026e-11,
+          "tolerance": 1e-9,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        }
+      ]
+    },
+    "channel-bend": {
+      "label": "90-degree channel bend",
+      "classification": "self-validated",
+      "reference": {
+        "id": "planePoiseuille",
+        "citation": "Plane Poiseuille flow: for a channel of width w with mean velocity U, u(y) = 1.5*U*(1 - (2(y-yc)/w)^2) and dp/dx = -12*mu*U/w^2.",
+        "verification": "derived"
+      },
+      "caveat": "The bend results themselves are NOT benchmarked. No external source says the separation bubble should be 1.555w at Re=200; it is reported because the solver is trusted, not the other way round.",
+      "measuredBy": "tests/test6_channel_bend.js",
+      "claims": [
+        {
+          "quantity": "inlet-leg dp/dx vs -12*mu*U/w^2 (relative)",
+          "reference": 0,
+          "measured": 0.007791980156721296,
+          "tolerance": 0.02,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "inlet-leg profile convergence order",
+          "reference": 2,
+          "measured": 1.9323716370763335,
+          "tolerance": 0.3,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "flux deviation through all cuts (relative)",
+          "reference": 0,
+          "measured": 6.906166083453513e-9,
+          "tolerance": 0.000001,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "velocity on the duct walls",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 0,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "sharp bend separates at the inner corner",
+          "reference": null,
+          "measured": null,
+          "tolerance": null,
+          "relative": false,
+          "referenceType": "physical-reasoning",
+          "result": "reported"
+        },
+        {
+          "quantity": "radiusing suppresses the separation",
+          "reference": null,
+          "measured": null,
+          "tolerance": null,
+          "relative": false,
+          "referenceType": "physical-reasoning",
+          "result": "reported"
+        }
+      ]
+    }
+  }
+}
