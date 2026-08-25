@@ -15,7 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { StaggeredGrid } from "../geometry/grid.js";
-import { step, computeDivergence } from "../solver/ns2d.js";
+import { step, computeDivergence, SolverDivergenceError } from "../solver/ns2d.js";
 import {
   computeStableTimestep,
   stabilityLimits,
@@ -337,4 +337,104 @@ test("M1 - the pressure solve meets the divergence tolerance it is given", () =>
       `requested divergence below ${tol}, got ${divergence.max}`
     );
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// Divergence control. Distinct from the failure handling above: that is about
+// the scheme coming apart, this is about the continuity constraint being met.
+// ---------------------------------------------------------------------------
+
+test("M1 - the divergence bound is enforced, not merely reported", () => {
+  const setup = cavity(32, 400);
+  marchAdaptively(setup, { safety: 0.4, until: 1 });
+  const { grid, bc, params } = setup;
+  const dt = computeStableTimestep(grid, { nu: params.nu, safety: 0.4 }).dt;
+
+  // Starve the pressure solve so it cannot reach the requested bound. Before
+  // this was enforced, step() returned normally here with divergence 9.0e-3
+  // against a promised 1e-8 - five orders of magnitude out, flagged only by a
+  // poissonConverged field that nothing was obliged to read.
+  const error = captureThrow(
+    () => step(grid, bc, { ...params, dt, poissonMaxIterations: 3 }),
+    "a pressure solve that cannot meet its divergence bound"
+  );
+
+  console.log(`[M1 divergence] ${error.message}`);
+  assert.ok(error instanceof SolverDivergenceError, `expected SolverDivergenceError, got ${error}`);
+  assert.equal(error.reason, "divergence-bound");
+  assert.equal(error.requested, params.divergenceTol);
+  assert.ok(error.achieved > error.requested, "the error must carry what was actually achieved");
+  assert.match(error.message, /asked for/);
+  assert.match(error.message, /achieved/);
+  // The message has to name a remedy, not just complain.
+  assert.match(error.message, /poissonMaxIterations/);
+});
+
+test("M1 - a solve that meets its bound does not throw", () => {
+  const setup = cavity(32, 400);
+  const { grid, bc, params } = setup;
+  const dt = computeStableTimestep(grid, { nu: params.nu, safety: 0.4 }).dt;
+  const result = step(grid, bc, { ...params, dt });
+  assert.equal(result.poissonConverged, true);
+  assert.ok(result.divergence <= params.divergenceTol);
+});
+
+test("M1 - the reported divergence is the divergence the field actually has", () => {
+  // step() reports the achieved divergence from the identity
+  // div = -(dt/rho) * residual, which costs nothing because the residual is
+  // already known. That is only worth doing if the identity is real, so it is
+  // checked against an independent scan of the field rather than assumed.
+  const setup = cavity(32, 400);
+  const { grid, bc, params } = setup;
+  let previousTimestep = null;
+  let worstRatio = 0;
+
+  for (let n = 0; n < 120; n++) {
+    const selection = computeStableTimestep(grid, {
+      nu: params.nu, safety: 0.4, previousTimestep,
+    });
+    previousTimestep = selection.dt;
+    const result = step(grid, bc, { ...params, dt: selection.dt });
+    const measured = computeDivergence(grid).max;
+    worstRatio = Math.max(worstRatio, Math.abs(result.divergence / measured - 1));
+  }
+
+  console.log(`[M1 identity] reported vs measured divergence agree to ${worstRatio.toExponential(2)} relative over 120 steps`);
+
+  // The two agree exactly in real arithmetic - div_k = -(dt/rho)*r_k holds per
+  // cell, so the same cell attains both maxima. They differ only in floating
+  // point, and the gap is dominated by cancellation in the direct scan rather
+  // than by anything wrong with the identity: computeDivergence differences
+  // velocities of order 1 to produce a result of order 1e-10, which costs
+  // roughly eps*|u|/|div| ~ 7e-7 of relative accuracy. Measured worst over 120
+  // steps is 3.6e-6; 1e-4 leaves headroom without being meaningless.
+  assert.ok(
+    worstRatio < 1e-4,
+    `the reported divergence should match a direct scan, worst relative gap ${worstRatio}`
+  );
+});
+
+test("M1 - divergence does not accumulate over a long run", () => {
+  // The projection re-enforces incompressibility every step, so divergence
+  // should sit at the tolerance indefinitely rather than creeping upward. If
+  // it crept, the bound would be meaningless over a long integration.
+  const setup = cavity(32, 400);
+  const { grid, bc, params } = setup;
+  let previousTimestep = null;
+  const samples = [];
+  let worst = 0;
+
+  for (let n = 1; n <= 1200; n++) {
+    const selection = computeStableTimestep(grid, {
+      nu: params.nu, safety: 0.4, previousTimestep,
+    });
+    previousTimestep = selection.dt;
+    const result = step(grid, bc, { ...params, dt: selection.dt });
+    worst = Math.max(worst, result.divergence);
+    if (n % 400 === 0) samples.push(`step ${n}: ${result.divergence.toExponential(2)}`);
+  }
+
+  console.log(`[M1 no drift] ${samples.join("   ")}   worst=${worst.toExponential(2)} (bound ${params.divergenceTol.toExponential(0)})`);
+  assert.ok(worst <= params.divergenceTol, `divergence must stay within its bound, worst ${worst}`);
 });

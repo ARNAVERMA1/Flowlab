@@ -16,7 +16,7 @@
 //      simulation cannot be restarted except through Reset, so a stale frame
 //      can never be mistaken for a live one.
 
-import { step, computeDivergence } from "../solver/ns2d.js";
+import { step, computeDivergence, SolverDivergenceError } from "../solver/ns2d.js";
 import { computeStableTimestep, SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { VelocityFieldRenderer } from "../visualization/velocityField.js";
@@ -128,7 +128,12 @@ export class Harness {
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
-      if (!(error instanceof SolverStabilityError)) throw error;
+      // Both solver failure modes are hard stops here: the scheme coming apart
+      // (stability) and the projection failing to deliver the incompressibility
+      // it promised (divergence).
+      const isSolverFailure =
+        error instanceof SolverStabilityError || error instanceof SolverDivergenceError;
+      if (!isSolverFailure) throw error;
       this.state = "failed";
       this.stopLoop();
       this.failure = error.message;

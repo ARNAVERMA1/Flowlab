@@ -3,7 +3,7 @@
 Working agreement item 7: *document the numerical method chosen and why —
 stability, accuracy, implementation cost, and room to expand.*
 
-M1 changed three things about how the solver behaves, none of them about what
+M1 changed four things about how the solver behaves, none of them about what
 it computes. All six M0 validation scenarios pass unchanged throughout.
 
 ---
@@ -148,7 +148,42 @@ steps instead of 820.
 
 ---
 
-## 3. Failure behaviour
+## 3. Divergence control
+
+Distinct from the failure handling below: that is about the scheme coming
+apart, this is about the continuity constraint `∇·u = 0` being met.
+
+Three of the four parts were already in place and are sound:
+
+- **Measurement** — `computeDivergence` reports max and rms, and cannot report a
+  calm number on a broken field.
+- **A bound in physical units** — `divergenceTol` is stated as a promise about
+  the field a step produces, not as an opaque solver tolerance. It works
+  because after the correction the remaining divergence is *exactly*
+  `−(dt/ρ) × (Poisson residual)`.
+- **No accumulation** — the projection re-enforces incompressibility every step.
+  Measured over 1200 steps: 9.0e-9, 7.3e-9, 8.4e-9, worst 1.00e-8 against a
+  1e-8 bound. It sits at the tolerance rather than creeping.
+
+The fourth was missing: **the bound was a target, not a contract.** A pressure
+solve that ran out of iterations returned `poissonConverged: false` and `step()`
+carried on regardless. Measured with a starved solve: divergence **9.0e-3
+against a promised 1e-8 — 900,000× over** — with nothing but an easily ignored
+flag to say so. That is the same ignorable-status pattern that produced both
+non-finite reporting bugs.
+
+`step()` now throws `SolverDivergenceError` when the bound is not met, naming
+what was asked, what was achieved, how many iterations were used, and the
+remedy. **The check is free**: the achieved value follows from the residual, so
+no second pass over the field is needed. The identity is pinned by a test
+against an independent scan rather than trusted — they agree to 3.6e-6
+relative, the gap being cancellation in the direct scan (differencing
+velocities of order 1 to get a result of order 1e-10), not error in the
+identity.
+
+---
+
+## 4. Failure behaviour
 
 The decision: **hard stop with a diagnostic, never a silent clamp.**
 
@@ -192,3 +227,34 @@ own M1 test so it cannot be erased by accident.
 - **The explicit scheme's viscous limit scales as h²**, so refinement gets
   expensive quickly. An implicit diffusion treatment would lift that and is the
   obvious next hardening step.
+
+---
+
+## Handover to M2
+
+M1 is closed. The one thing M2 must address before anything else:
+
+**The Ghia et al. reference tables in `tests/support/ghia.js` are transcribed
+from memory, not read from the paper.** They carry a provenance warning saying
+so, and one Re=400 v-velocity entry (x = 0.9063) is already marked `null` as
+unverifiable — found because the solver reproduced all sixteen other points on
+that row to within 8e-3 and disagreed with that one by 1.4e-1.
+
+Status of the cross-checking so far:
+
+| table | status |
+|---|---|
+| Table I (u along the vertical centreline) | **partially** cross-checked against an independent source |
+| Table II (v along the horizontal centreline) | **unconfirmed** |
+
+This matters more than anything else in the suite because Test 4 is the
+go/no-go benchmark gate — the test that decides whether this is a solver or an
+animation — and it rests entirely on these numbers. A validation suite built on
+unverified reference data is not a validation suite.
+
+**M2's first task, ahead of formalising the rest of the suite: replace the
+transcribed Ghia tables with a verified source, and resolve the flagged Re=400
+point.** The continuity self-check already in Test 4 is a weak guard (trapezoid
+quadrature over 17 sparse points, its own error ~1e-2) and explicitly did not
+catch the bad entry — that was found by comparison against the solver, which is
+not a method that generalises.

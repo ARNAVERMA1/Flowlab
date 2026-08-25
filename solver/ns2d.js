@@ -42,6 +42,17 @@
 
 import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
 
+// Raised when the projection cannot deliver the incompressibility it was asked
+// for. Distinct from SolverStabilityError: that one is about the scheme coming
+// apart, this one is about the continuity constraint not being met.
+export class SolverDivergenceError extends Error {
+  constructor(message, detail) {
+    super(message);
+    this.name = "SolverDivergenceError";
+    Object.assign(this, detail);
+  }
+}
+
 function idxFor(grid) {
   const { stride } = grid;
   return (i, j) => i + stride * j;
@@ -608,10 +619,45 @@ export function step(grid, bc, params) {
     }
   }
 
+  // Divergence control: enforce the bound, do not merely report it.
+  //
+  // divergenceTol is stated as a promise about the field this step produces,
+  // and until now it was only a target. A pressure solve that ran out of
+  // iterations returned poissonConverged: false and step() carried on, so the
+  // caller could receive a field whose divergence exceeded the requested bound
+  // by five orders of magnitude with nothing but an easily ignored flag to say
+  // so - measured at 9.0e-3 against a promised 1e-8. That is the same
+  // ignorable-status pattern that produced the two non-finite reporting bugs.
+  //
+  // The check is free. After the correction the remaining divergence is exactly
+  // -(dt/rho) times the Poisson residual, so the achieved value is already
+  // known from the solve and needs no second pass over the field. The identity
+  // itself is pinned by a test rather than trusted.
+  const achievedDivergence = (dt / rho) * poisson.residual;
+  if (enteredFinite && achievedDivergence > divergenceTol) {
+    throw new SolverDivergenceError(
+      `the pressure solve could not meet the requested divergence bound: ` +
+      `asked for ${divergenceTol.toExponential(2)}, achieved ` +
+      `${achievedDivergence.toExponential(2)} after ${poisson.iterations} iterations ` +
+      `(${(achievedDivergence / divergenceTol).toExponential(1)}x over). ` +
+      `Raise poissonMaxIterations, or loosen divergenceTol if this accuracy is ` +
+      `genuinely not needed.`,
+      {
+        reason: "divergence-bound",
+        requested: divergenceTol,
+        achieved: achievedDivergence,
+        iterations: poisson.iterations,
+        residual: poisson.residual,
+      }
+    );
+  }
+
   return {
     poissonIterations: poisson.iterations,
     poissonResidual: poisson.residual,
     poissonConverged: poisson.converged,
+    // The divergence of the field this step produced, from the identity above.
+    divergence: achievedDivergence,
   };
 }
 
