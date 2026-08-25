@@ -7,9 +7,12 @@
 // constructed so the nonlinear and pressure terms vanish identically.
 // Everything validated before this point is necessary but not sufficient.
 //
-// Reference: Ghia, Ghia & Shin (1982), 129x129 grid. See support/ghia.js,
-// including the provenance warning - one entry of the Re=400 v table is
-// marked unknown because this transcription of it could not be trusted.
+// Reference: Ghia, Ghia & Shin (1982), 129x129 grid. The tables in
+// support/ghia.js are a faithful transcription cross-referenced against an
+// independent source. One point - Re=400, x=0.9063 - is excluded from the
+// comparison because the PUBLISHED value is held unreliable, by the source
+// transcription's own note and independently by this solver's disagreement
+// with it. The exclusion and its evidence live in support/ghia.js.
 //
 // This is the slowest file in the suite (~75 s): each Reynolds number is
 // marched to steady state on a 64x64 grid. Runs are memoised and shared
@@ -30,21 +33,32 @@ import {
   X,
   V_CENTRELINE,
   PRIMARY_VORTEX_CENTRE,
+  EXCLUDED_POINTS,
+  isExcluded,
+  exclusionFor,
 } from "./support/ghia.js";
 
 const N = 64;
 
-// Compares against a reference row that may contain nulls for values that
-// could not be verified. Returns the per-point detail so an outlier is
-// visible in the output rather than hidden inside a single max.
-function compareToReference(computed, reference, coords) {
+// Compares against a reference row. The reference tables are a faithful
+// transcription of the paper - no value is nulled or adjusted - so a point that
+// should not be compared against is identified through the exclusion list in
+// support/ghia.js, which records the reason. Returns the per-point detail so an
+// outlier is visible in the output rather than hidden inside a single max.
+function compareToReference(computed, reference, coords, table, Re) {
   let maxError = 0;
   let skipped = 0;
   const rows = [];
   for (let k = 0; k < reference.length; k++) {
-    if (reference[k] === null) {
+    if (table && isExcluded(table, Re, k)) {
       skipped++;
-      rows.push({ coord: coords[k], computed: computed[k], reference: null, error: null });
+      rows.push({
+        coord: coords[k],
+        computed: computed[k],
+        reference: reference[k],
+        error: null,
+        excluded: exclusionFor(table, Re, k),
+      });
       continue;
     }
     const error = Math.abs(computed[k] - reference[k]);
@@ -57,10 +71,10 @@ function compareToReference(computed, reference, coords) {
 function reportProfile(label, cmp) {
   console.log(`          ${label}`);
   for (const r of cmp.rows) {
-    if (r.reference === null) {
+    if (r.excluded) {
       console.log(
         `            ${r.coord.toFixed(4)}  solver=${r.computed.toFixed(6).padStart(10)}  ` +
-        `reference=  (unknown - skipped)`
+        `reference=${r.reference.toFixed(5).padStart(9)}  EXCLUDED (published value held unreliable)`
       );
     } else {
       console.log(
@@ -75,8 +89,8 @@ test("Test 4 - lid-driven cavity at Re=100 matches Ghia et al.", () => {
   const run = runCavityToSteadyState({ n: N, Re: 100 });
   const u = uAlongVerticalCentreline(run.grid, Y, run.U);
   const v = vAlongHorizontalCentreline(run.grid, X);
-  const cu = compareToReference(u, U_CENTRELINE[100], Y);
-  const cv = compareToReference(v, V_CENTRELINE[100], X);
+  const cu = compareToReference(u, U_CENTRELINE[100], Y, "U_CENTRELINE", 100);
+  const cv = compareToReference(v, V_CENTRELINE[100], X, "V_CENTRELINE", 100);
   const centre = primaryVortexCentre(run.grid);
   const ref = PRIMARY_VORTEX_CENTRE[100];
 
@@ -166,8 +180,8 @@ test("Test 4 - cavity stays accurate at Re=400 and Re=1000", () => {
     const run = runCavityToSteadyState({ n: N, Re });
     const u = uAlongVerticalCentreline(run.grid, Y, run.U);
     const v = vAlongHorizontalCentreline(run.grid, X);
-    const cu = compareToReference(u, U_CENTRELINE[Re], Y);
-    const cv = compareToReference(v, V_CENTRELINE[Re], X);
+    const cu = compareToReference(u, U_CENTRELINE[Re], Y, "U_CENTRELINE", Re);
+    const cv = compareToReference(v, V_CENTRELINE[Re], X, "V_CENTRELINE", Re);
     const centre = primaryVortexCentre(run.grid);
     const ref = PRIMARY_VORTEX_CENTRE[Re];
 
@@ -208,10 +222,10 @@ test("Test 4 - Ghia reference data is physically self-consistent", () => {
   // mistyped value - the Re=400 v entry now marked unknown was found by
   // noticing it disagreed with the solver by 20x more than every other
   // point on the same row, not by this test.
-  function integrate(coords, values) {
+  function integrate(coords, values, table, Re) {
     const pairs = coords
-      .map((c, i) => [c, values[i]])
-      .filter(([, f]) => f !== null)
+      .map((c, i) => [c, values[i], i])
+      .filter(([, , i]) => !(table && isExcluded(table, Re, i)))
       .sort((a, b) => a[0] - b[0]);
     let s = 0;
     for (let i = 1; i < pairs.length; i++) {
@@ -221,8 +235,8 @@ test("Test 4 - Ghia reference data is physically self-consistent", () => {
   }
 
   for (const Re of [100, 400, 1000]) {
-    const iu = integrate(Y, U_CENTRELINE[Re]);
-    const iv = integrate(X, V_CENTRELINE[Re]);
+    const iu = integrate(Y, U_CENTRELINE[Re], "U_CENTRELINE", Re);
+    const iv = integrate(X, V_CENTRELINE[Re], "V_CENTRELINE", Re);
     console.log(
       `[Test 4 reference data] Re=${String(Re).padStart(4)}: ` +
       `integral(u dy)=${iu.toFixed(5)} integral(v dx)=${iv.toFixed(5)} (both should be 0)`
