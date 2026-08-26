@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { StaggeredGrid } from "../geometry/grid.js";
 import { step } from "../solver/ns2d.js";
 import { computeStableTimestep } from "../solver/stability.js";
-import { buildScenario } from "../scenarios/index.js";
+import { buildScenario, SCENARIOS } from "../scenarios/index.js";
 import { PassiveTracer, vanLeer, donorCell } from "../tracer/passiveScalar.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { prepareView, fieldSourceAvailable } from "../visualization/fieldSources.js";
@@ -533,5 +533,29 @@ test("M3 - the first step from rest is where the tracer's own bound binds", () =
     `[M3 tracer] first step from rest: dt ${first.dt.toExponential(2)} (viscous-limited), ` +
     `tracer CFL ${advection.cfl.toFixed(2)} -> ${advection.substeps} substeps; ` +
     `settles to ${worst.toFixed(3)} over the next 40 steps`
+  );
+});
+
+test("M3 - the seeded flag matches what each scenario's seed actually produces", () => {
+  // The flag drives whether the Reseed control is offered, so a stale one puts
+  // a button on screen that clears the dye and looks like it did nothing.
+  // Checking the declaration against the behaviour keeps them from drifting.
+  for (const entry of SCENARIOS) {
+    const config = tracerConfigFor(entry.id);
+    const scenario = buildScenario(entry.id);
+    const tracer = new PassiveTracer(scenario.grid);
+    tracer.seed(scenario.grid, config.seed);
+    const produced = tracer.total(scenario.grid).total > 0;
+    assert.equal(
+      config.seeded,
+      produced,
+      `${entry.id}: declares seeded=${config.seeded} but its seed produces ${produced ? "dye" : "nothing"}`
+    );
+    assert.ok(config.note?.length > 20, `${entry.id}: needs a note explaining how dye gets in`);
+  }
+  const seeded = SCENARIOS.filter((s) => tracerConfigFor(s.id).seeded).map((s) => s.id);
+  console.log(
+    `[M3 tracer] seeded scenarios: ${seeded.join(", ") || "none"}; ` +
+    `the rest are injection-only and offer no reseed`
   );
 });

@@ -209,6 +209,23 @@ async function main() {
   lines.push("- A CFL-respecting timestep is not sufficient near a geometric singularity.");
   lines.push("- Obstacles are staircase-resolved to about one cell.");
   lines.push("- The explicit viscous limit scales as h², so refinement gets expensive quickly.");
+  lines.push(
+    "- The first step of a run from rest is taken outside the stability limit the " +
+    "driver believes it is enforcing: dt is sized from the field before the step, " +
+    "which is motionless, so the viscous limit sets it and the flow that exists " +
+    "afterwards is moving. Measured at an effective convective CFL near 5 on the " +
+    "sharp bend. It survives — dt drops by 13x on the next step and no validation " +
+    "case is affected — and is recorded rather than fixed. See " +
+    "`docs/M3-visualization.md` §2."
+  );
+  lines.push("");
+  lines.push(
+    "From `docs/M3-visualization.md`, and bearing on what this document does NOT " +
+    "cover: the dye tracer added in M3 is a visualization aid, not a result. No " +
+    "case below validates it, nothing external says a dye pattern is right, and " +
+    "the harness labels it accordingly. The pressure view shows the first-order " +
+    "Chorin projection pressure, which is not the true pressure near walls."
+  );
   lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
   if (unverified.length) {

@@ -129,6 +129,14 @@ export class Harness {
     this.tracerConfig = tracerConfigFor(id);
     this.seedTracer();
 
+    // Reseed is only meaningful where there is an initial pattern to restore.
+    // On an injection-only scenario it would clear the dye and appear to do
+    // nothing, so it says why it is unavailable instead.
+    const reseed = this.root.querySelector("#reseed");
+    reseed.disabled = !this.tracerConfig.seeded;
+    reseed.title = this.tracerConfig.note;
+    this.root.querySelector("#dyenote").textContent = this.tracerConfig.note;
+
     const canvas = this.root.querySelector("#field");
     const scale = Math.max(1, Math.min(9, Math.floor(760 / grid.nx)));
     canvas.width = grid.nx * scale;
@@ -143,6 +151,7 @@ export class Harness {
   // flow keeps whatever state it has and only what is painted into it changes.
   seedTracer() {
     if (!this.tracer || !this.scenario) return;
+    if (!this.tracerConfig.seeded) return;
     this.tracer.clear();
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
     if (this.scenario) this.draw();
