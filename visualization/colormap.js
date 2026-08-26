@@ -37,18 +37,64 @@ export const SOLID_COLOUR = [0x33, 0x33, 0x31];
 
 export const SURFACE_COLOUR = SURFACE;
 
-// Maps a normalised magnitude in [0,1] to an [r,g,b] triple.
+// Diverging ramp for signed fields - pressure. Lightness rises away from the
+// centre on both arms so magnitude still reads correctly in greyscale, and the
+// sign is carried by hue. Blue against amber rather than blue against red:
+// blue/orange is the axis that survives both deuteranopia and protanopia,
+// where blue/red does not.
+//
+// The centre stop sits close to the page surface, so the large regions of a
+// pressure field that are near the mean recede and the extremes stand out -
+// which is where the interesting structure is.
+const DIVERGING_STOPS = [
+  [0xc8, 0xde, 0xfb],
+  [0xa4, 0xc6, 0xf2],
+  [0x7f, 0xad, 0xe4],
+  [0x5b, 0x92, 0xd2],
+  [0x3d, 0x74, 0xb4],
+  [0x2c, 0x53, 0x86],
+  [0x2a, 0x2a, 0x28],
+  [0x86, 0x54, 0x22],
+  [0xb4, 0x71, 0x2a],
+  [0xd2, 0x8c, 0x35],
+  [0xe4, 0xa7, 0x50],
+  [0xf2, 0xc4, 0x7f],
+  [0xfb, 0xdd, 0xb0],
+];
+
+// Dye ramp. Deliberately a different hue from both state fields, because dye
+// is not a solver state field and must not be mistaken for one - VISION 4.2.
+// The darkest stop is a green-tinted near-black rather than the surface colour
+// exactly, so an undyed fluid region is still distinguishable from the page.
+const DYE_STOPS = [
+  [0x1e, 0x26, 0x20],
+  [0x22, 0x33, 0x28],
+  [0x27, 0x42, 0x30],
+  [0x2c, 0x52, 0x38],
+  [0x32, 0x63, 0x41],
+  [0x39, 0x75, 0x4a],
+  [0x42, 0x88, 0x55],
+  [0x50, 0x9b, 0x62],
+  [0x63, 0xae, 0x73],
+  [0x7c, 0xc0, 0x88],
+  [0x9a, 0xd2, 0xa1],
+  [0xbb, 0xe3, 0xbe],
+  [0xdc, 0xf3, 0xdd],
+];
+
+// Maps a normalised position in [0,1] to an [r,g,b] triple.
 // A non-finite input returns NON_FINITE_COLOUR rather than clamping to an end
 // of the ramp: clamping is exactly how a broken field acquires a healthy
-// looking colour.
-export function sampleRamp(t) {
+// looking colour. Every ramp in this file goes through here, so that guarantee
+// holds for pressure and dye as well as velocity.
+function sample(stops, t) {
   if (!Number.isFinite(t)) return NON_FINITE_COLOUR;
   const clamped = t <= 0 ? 0 : t >= 1 ? 1 : t;
-  const scaled = clamped * (STOPS.length - 1);
-  const i = Math.min(STOPS.length - 2, Math.floor(scaled));
+  const scaled = clamped * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(scaled));
   const f = scaled - i;
-  const a = STOPS[i];
-  const b = STOPS[i + 1];
+  const a = stops[i];
+  const b = stops[i + 1];
   return [
     Math.round(a[0] + (b[0] - a[0]) * f),
     Math.round(a[1] + (b[1] - a[1]) * f),
@@ -56,8 +102,28 @@ export function sampleRamp(t) {
   ];
 }
 
+export function sampleRamp(t) {
+  return sample(STOPS, t);
+}
+
+export function sampleDiverging(t) {
+  return sample(DIVERGING_STOPS, t);
+}
+
+export function sampleDye(t) {
+  return sample(DYE_STOPS, t);
+}
+
 export function rampCss(t) {
   const [r, g, b] = sampleRamp(t);
+  return `rgb(${r},${g},${b})`;
+}
+
+// CSS for an arbitrary sampler, so the legend can be painted from whichever
+// ramp the current view is actually using rather than a hardcoded gradient
+// that could drift away from the picture.
+export function samplerCss(sampler, t) {
+  const [r, g, b] = sampler(t);
   return `rgb(${r},${g},${b})`;
 }
 

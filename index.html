@@ -83,6 +83,12 @@
   .vtable .dim { color: var(--ink-dim); }
   .vnote { color: var(--ink-dim); font-size: 11px; margin: 8px 0 0; line-height: 1.45; }
   .vnote.bad { color: #ffc2d3; }
+  .legend .ends span:nth-child(2) { color: var(--ink-dim); }
+  .tag {
+    text-transform: none; letter-spacing: 0; font-weight: 500;
+    color: #7fb07f; border: 1px solid #3d5a3d; border-radius: 3px;
+    padding: 1px 5px; margin-left: 6px; font-size: 10px;
+  }
 </style>
 </head>
 <body>
@@ -98,6 +104,9 @@
         <button id="pause">Pause</button>
         <button id="reset">Reset</button>
         <select id="scenario" aria-label="Scenario"></select>
+        <select id="mode" aria-label="View"></select>
+        <button id="reseed">Reseed dye</button>
+        <button id="cleardye">Clear dye</button>
       </div>
       <canvas id="field"></canvas>
       <p id="note"></p>
@@ -126,6 +135,18 @@
       </div>
 
       <div class="panel">
+        <h2>Dye tracer <span class="tag">visualization aid</span></h2>
+        <dl>
+          <dt>total dye</dt><dd id="dyetotal">-</dd>
+          <dt>not finite</dt><dd id="dyebroken">-</dd>
+          <dt>tracer CFL</dt><dd id="dyecfl">-</dd>
+          <dt>substeps</dt><dd id="dyesubsteps">-</dd>
+        </dl>
+        <p class="vnote">Advected by the flow; feeds nothing back into it. Not a
+        solver state field.</p>
+      </div>
+
+      <div class="panel">
         <h2>Continuity &amp; pressure solve</h2>
         <dl>
           <dt>max |&nabla;&middot;u|</dt><dd id="divmax">-</dd>
@@ -149,7 +170,12 @@
         </dl>
         <div class="legend">
           <div id="legendbar"></div>
-          <div class="ends"><span>0</span><span id="legendmax">-</span></div>
+          <div class="ends">
+            <span id="legendmin">-</span>
+            <span id="legendmid"></span>
+            <span id="legendmax">-</span>
+          </div>
+          <p id="viewnote" class="vnote"></p>
         </div>
         <div class="key">
           <span><i class="sw" style="background:#333331"></i> solid</span>

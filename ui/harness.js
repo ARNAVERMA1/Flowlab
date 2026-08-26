@@ -1,5 +1,5 @@
-// Solver harness: Run / Pause / Reset, a velocity-magnitude colour map, and the
-// raw numbers behind it.
+// Solver harness: Run / Pause / Reset, a scalar colour map, and the raw
+// numbers behind it.
 //
 // This layer drives the solver and reads its output. It never reaches into the
 // numerics: the only solver entry point used is step(), and the only fields
@@ -15,13 +15,27 @@
 //      to a failure state, and the affected quantities are shown as NaN. The
 //      simulation cannot be restarted except through Reset, so a stale frame
 //      can never be mistaken for a live one.
+//
+// M3 adds two more views and a dye tracer. The rule they are held to:
+// switching what is displayed is a PURE DISPLAY CHANGE. setMode() sets a
+// string and redraws - it does not step, reset, rebuild the scenario or touch
+// a field. The dye is advected by the flow and feeds nothing back into it;
+// see tracer/passiveScalar.js for how that separation is enforced and
+// tests/test9_m3_visualization.js for the assertion that it holds.
 
 import { step, computeDivergence, SolverDivergenceError } from "../solver/ns2d.js";
 import { computeStableTimestep, SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
-import { VelocityFieldRenderer } from "../visualization/velocityField.js";
-import { rampCss } from "../visualization/colormap.js";
+import { FieldRenderer } from "../visualization/fieldRenderer.js";
+import { samplerCss } from "../visualization/colormap.js";
+import {
+  prepareView,
+  FIELD_SOURCES,
+  DEFAULT_FIELD_SOURCE,
+} from "../visualization/fieldSources.js";
 import { buildScenario, SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
+import { PassiveTracer } from "../tracer/passiveScalar.js";
+import { tracerConfigFor } from "../tracer/seeds.js";
 import { assessField } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
@@ -33,12 +47,14 @@ export class Harness {
   constructor(root) {
     this.root = root;
     this.scenarioId = DEFAULT_SCENARIO;
-    this.renderer = new VelocityFieldRenderer(root.querySelector("#field"));
+    this.mode = DEFAULT_FIELD_SOURCE;
+    this.renderer = new FieldRenderer(root.querySelector("#field"));
     this.state = "paused"; // paused | running | failed
     this.iteration = 0;
     this.simulatedTime = 0;
     this.lastStep = null;
     this.lastTimestep = null;
+    this.lastTracer = null;
     this.failure = null;
     this.frame = null;
 
@@ -55,6 +71,8 @@ export class Harness {
     root.querySelector("#run").addEventListener("click", () => this.run());
     root.querySelector("#pause").addEventListener("click", () => this.pause());
     root.querySelector("#reset").addEventListener("click", () => this.load(this.scenarioId));
+    root.querySelector("#reseed").addEventListener("click", () => this.seedTracer());
+    root.querySelector("#cleardye").addEventListener("click", () => this.clearTracer());
 
     const select = root.querySelector("#scenario");
     for (const entry of SCENARIOS) {
@@ -68,6 +86,24 @@ export class Harness {
       this.scenarioId = select.value;
       this.load(this.scenarioId);
     });
+
+    const mode = root.querySelector("#mode");
+    for (const source of FIELD_SOURCES) {
+      const option = document.createElement("option");
+      option.value = source.id;
+      option.textContent = source.label;
+      mode.appendChild(option);
+    }
+    mode.value = this.mode;
+    mode.addEventListener("change", () => this.setMode(mode.value));
+  }
+
+  // A pure display change. No step, no reset, no field is touched - which is
+  // the whole requirement for M3's mode switching, and is asserted rather than
+  // assumed in tests/test9_m3_visualization.js.
+  setMode(id) {
+    this.mode = id;
+    this.draw();
   }
 
   // Cancels the animation loop without drawing. load() needs this because
@@ -84,10 +120,15 @@ export class Harness {
     this.simulatedTime = 0;
     this.lastStep = null;
     this.lastTimestep = null;
+    this.lastTracer = null;
     this.failure = null;
     this.state = "paused";
 
     const { grid } = this.scenario;
+    this.tracer = new PassiveTracer(grid);
+    this.tracerConfig = tracerConfigFor(id);
+    this.seedTracer();
+
     const canvas = this.root.querySelector("#field");
     const scale = Math.max(1, Math.min(9, Math.floor(760 / grid.nx)));
     canvas.width = grid.nx * scale;
@@ -96,6 +137,21 @@ export class Harness {
     this.root.querySelector("#note").textContent = this.scenario.note;
     this.validation.render(id);
     this.draw();
+  }
+
+  // Dye controls only ever touch the tracer. They do not reset the run: the
+  // flow keeps whatever state it has and only what is painted into it changes.
+  seedTracer() {
+    if (!this.tracer || !this.scenario) return;
+    this.tracer.clear();
+    this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
+    if (this.scenario) this.draw();
+  }
+
+  clearTracer() {
+    if (!this.tracer) return;
+    this.tracer.clear();
+    if (this.scenario) this.draw();
   }
 
   run() {
@@ -131,6 +187,12 @@ export class Harness {
         this.lastStep = step(grid, bc, { ...params, dt: selection.dt });
         this.iteration++;
         this.simulatedTime += selection.dt;
+        // The tracer runs after the step, on the velocity field the solver has
+        // just produced, and takes the timestep it is given. It never asks for
+        // a different one - see PassiveTracer.advect.
+        this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
+          inject: this.tracerConfig.inject,
+        });
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
@@ -164,11 +226,12 @@ export class Harness {
       this.failure = health.message;
     }
 
-    this.renderer.render(grid, inspection);
-    this.updateReadouts(inspection, divergence, health);
+    const view = prepareView(this.mode, { grid, tracer: this.tracer });
+    this.renderer.render(grid, view);
+    this.updateReadouts(inspection, divergence, health, view);
   }
 
-  updateReadouts(inspection, divergence, health) {
+  updateReadouts(inspection, divergence, health, view) {
     const { scenario, root } = this;
     const { params, grid } = scenario;
 
@@ -224,21 +287,72 @@ export class Harness {
     root.querySelector("#run").disabled = this.state !== "paused";
     root.querySelector("#pause").disabled = this.state !== "running";
 
-    this.updateLegend(health);
+    this.updateTracerReadouts();
+    this.updateLegend(view);
   }
 
-  updateLegend(health) {
+  updateTracerReadouts() {
+    const { root } = this;
+    const set = (id, text, bad = false) => {
+      const node = root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+
+    const { total, nonFiniteCells } = this.tracer.total(this.scenario.grid);
+    set("#dyetotal", exponential(total, 3), isBad(total));
+    set(
+      "#dyebroken",
+      nonFiniteCells === 0 ? "none" : `${integer(nonFiniteCells)} cells`,
+      nonFiniteCells > 0
+    );
+
+    const advection = this.lastTracer;
+    set("#dyecfl", advection ? fixed(advection.cfl, 3) : "-", advection ? isBad(advection.cfl) : false);
+    // Substeps above 1 mean the tracer's own bound was tighter than the step
+    // it was handed and it subdivided rather than asking for a smaller dt.
+    // Shown because a silent substep would hide exactly the situation the
+    // separate constraint exists to handle.
+    set("#dyesubsteps", advection ? integer(advection.substeps) : "-");
+  }
+
+  updateLegend(view) {
     const bar = this.root.querySelector("#legendbar");
-    if (!bar.dataset.painted) {
-      const stops = [];
-      for (let k = 0; k <= 12; k++) stops.push(`${rampCss(k / 12)} ${(k / 12) * 100}%`);
-      bar.style.background = `linear-gradient(to right, ${stops.join(", ")})`;
-      bar.dataset.painted = "1";
+    const painted = view ? view.id : "none";
+    if (bar.dataset.painted !== painted) {
+      if (view) {
+        const stops = [];
+        for (let k = 0; k <= 24; k++) {
+          stops.push(`${samplerCss(view.ramp, k / 24)} ${(k / 24) * 100}%`);
+        }
+        bar.style.background = `linear-gradient(to right, ${stops.join(", ")})`;
+      } else {
+        bar.style.background = "transparent";
+      }
+      bar.dataset.painted = painted;
     }
+
+    const set = (id, text, bad = false) => {
+      const node = this.root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+
+    if (!view) {
+      set("#legendmin", "-");
+      set("#legendmid", "");
+      set("#legendmax", "-");
+      set("#viewnote", "This view is not available for the current state.");
+      return;
+    }
+
     // Same rule as the peak readout: a scale drawn from a partly broken field
-    // is not a scale anyone should read a value off.
-    const max = health.reportedPeakSpeed;
-    this.root.querySelector("#legendmax").textContent = exponential(max, 2);
-    this.root.querySelector("#legendmax").classList.toggle("bad", isBad(max));
+    // is not a scale anyone should read a value off, and prepareView hands
+    // back NaN bounds rather than the survivors' range when that happens.
+    const { lo, hi, centre } = view.scale;
+    set("#legendmin", exponential(lo, 2), isBad(lo));
+    set("#legendmid", centre === null ? "" : exponential(centre, 2));
+    set("#legendmax", exponential(hi, 2), isBad(hi));
+    set("#viewnote", view.note);
   }
 }

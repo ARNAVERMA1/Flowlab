@@ -62,3 +62,54 @@ export function inspectField(grid) {
     maxSpeed: haveRange ? maxSpeed : NaN,
   };
 }
+
+// The same scan for an arbitrary cell-centred scalar - pressure, dye, anything
+// the display wants to colour. `valueAt(i, j)` supplies the value; this module
+// does not need to know what field it came from.
+//
+// Same rule as inspectField, for the same reason: the range and the count of
+// non-finite cells are returned together, so no caller can obtain a colour
+// scale without also being handed the evidence that it is meaningless. `mean`
+// is here because a pressure field with all-Neumann boundaries is only defined
+// up to a constant, so the display has to subtract something before it can
+// show it - see visualization/fieldSources.js.
+export function inspectScalar(grid, valueAt) {
+  const { nx, ny, solid } = grid;
+
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  let finiteCells = 0;
+  let nonFiniteCells = 0;
+  let firstNonFinite = null;
+
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 1; i <= nx; i++) {
+      if (solid[grid.idx(i, j)]) continue;
+      const value = valueAt(i, j);
+      if (!Number.isFinite(value)) {
+        nonFiniteCells++;
+        if (firstNonFinite === null) firstNonFinite = { i, j };
+        continue;
+      }
+      finiteCells++;
+      sum += value;
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+  }
+
+  const usable = nonFiniteCells === 0 && finiteCells > 0;
+  return {
+    finite: usable,
+    fluidCells: finiteCells + nonFiniteCells,
+    finiteCells,
+    nonFiniteCells,
+    firstNonFinite,
+    // A range drawn from the survivors of a partly broken field is not a range
+    // anyone should scale a picture by, so it is withheld entirely.
+    min: usable ? min : NaN,
+    max: usable ? max : NaN,
+    mean: usable ? sum / finiteCells : NaN,
+  };
+}
