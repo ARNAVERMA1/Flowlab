@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-25 17:02:16 UTC.
+Generated 2026-08-26 17:22:31 UTC.
 
 ## How to read this
 
@@ -163,6 +163,9 @@ Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
 - A CFL-respecting timestep is not sufficient near a geometric singularity.
 - Obstacles are staircase-resolved to about one cell.
 - The explicit viscous limit scales as h², so refinement gets expensive quickly.
+- The first step of a run from rest is taken outside the stability limit the driver believes it is enforcing: dt is sized from the field before the step, which is motionless, so the viscous limit sets it and the flow that exists afterwards is moving. Measured at an effective convective CFL near 5 on the sharp bend. It survives — dt drops by 13x on the next step and no validation case is affected — and is recorded rather than fixed. See `docs/M3-visualization.md` §2.
+
+From `docs/M3-visualization.md`, and bearing on what this document does NOT cover: the dye tracer added in M3 is a visualization aid, not a result. No case below validates it, nothing external says a dye pattern is right, and the harness labels it accordingly. The pressure view shows the first-order Chorin projection pressure, which is not the true pressure near walls.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 
