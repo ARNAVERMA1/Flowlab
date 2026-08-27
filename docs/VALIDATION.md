@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-26 17:22:31 UTC.
+Generated 2026-08-27 06:57:18 UTC.
 
 ## How to read this
 
@@ -32,6 +32,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | Lid-driven cavity | `benchmarked` | ghia1982 | `verified` |
 | Flow past a circular cylinder | `benchmarked` | cylinderWakeLength | `unverified` |
 | 90-degree channel bend | `self-validated` | planePoiseuille | `derived` |
+| Pressure-driven channel | `benchmarked` | planePoiseuille | `derived` |
 
 ## Still water
 
@@ -154,6 +155,30 @@ There is no published reference for this geometry, so the bend's own behaviour -
 | sharp bend separates at the inner corner | — | —<br><sub>bubble 2.768w, peak reverse 0.2214 U0</sub> | — | reported |
 | radiusing suppresses the separation | — | —<br><sub>smooth bend peak reverse 0.0011 U0 against 0.2214 sharp</sub> | — | reported |
 
+## Pressure-driven channel
+
+**Classification:** `benchmarked` — checked against a reference external to this project, so being wrong is detectable from outside
+
+**Asserted by:** `tests/test10_m4_boundary_conditions.js`
+
+The M4 pressure boundary condition checked against closed form. Nothing prescribes the flow rate here: the pressure is fixed at both ends, the projection determines the velocity through them, and the steady answer must be U_mean = dp*w^2/(12*mu*L). That makes it a genuine prediction rather than a restatement of an input, which is what separates this from the velocity-inlet cases. The convergence ORDER carries more weight here than any single error figure: a wrongly implemented boundary can be accidentally close on one grid, but it does not converge at second order to the right answer. The residual is the no-slip WALL treatment rather than the pressure ends - reflecting no-slip into the ghost is exact for a linear profile and O(h^2) for a parabolic one - which is why the local dp/dx error tracks the global rate error to three digits.
+
+**Reference:** Plane Poiseuille flow: for a channel of width w with mean velocity U, u(y) = 1.5*U*(1 - (2(y-yc)/w)^2) and dp/dx = -12*mu*U/w^2.
+
+**Verification:** reproducible from the equations
+
+> Standard closed-form result, reproducible from the equations.
+
+> ⚠️ **Caveat.** The agreement is RESOLUTION-QUALIFIED. 0.195% at 32 cells across the channel and 0.781% at 16, but 1.389% at 12: a coarse channel flows measurably too freely. What is prescribed is also the projection variable, which approximates the true pressure to O(dt) and carries a known error layer near walls, so the pressure NUMBER at the boundary is not an engineering-grade static pressure even though the flow it drives is right.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative) | 0 | 1.953e-3<br><sub>U_mean = 1.001953 against 1.000000</sub> | 0.01 | pass |
+| U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative) | 0 | 7.813e-3 | 0.02 | pass |
+| convergence order of the flow-rate error | 2 | 2<br><sub>second order is what a correct boundary treatment gives</sub> | 0.2 | pass |
+| flux deviation inlet to outlet | 0 | 9.113e-11<br><sub>the flux is an output here, so its constancy is a real check</sub> | 1.000e-8 | pass |
+| flow-rate inlet delivered vs requested (relative) | 0 | 0<br><sub>asked for 0.6, delivered 0.600000000000000</sub> | 1.000e-13 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -166,6 +191,8 @@ Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
 - The first step of a run from rest is taken outside the stability limit the driver believes it is enforcing: dt is sized from the field before the step, which is motionless, so the viscous limit sets it and the flow that exists afterwards is moving. Measured at an effective convective CFL near 5 on the sharp bend. It survives — dt drops by 13x on the next step and no validation case is affected — and is recorded rather than fixed. See `docs/M3-visualization.md` §2.
 
 From `docs/M3-visualization.md`, and bearing on what this document does NOT cover: the dye tracer added in M3 is a visualization aid, not a result. No case below validates it, nothing external says a dye pattern is right, and the harness labels it accordingly. The pressure view shows the first-order Chorin projection pressure, which is not the true pressure near walls.
+
+From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient with a global flux rescale, which reflects vortices back into the domain - adequate for the steady cases validated here, and a real limitation for unsteady wakes. A convective outflow was deferred rather than adopted, because changing it would perturb the cylinder benchmark. Obstacle surfaces carry uniform no-slip and are not configurable.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 

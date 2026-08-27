@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-26 17:22:31 UTC",
+  "generatedAt": "2026-08-27 06:57:18 UTC",
   "cases": {
     "still-water": {
       "label": "Still water",
@@ -275,6 +275,64 @@
           "relative": false,
           "referenceType": "physical-reasoning",
           "result": "reported"
+        }
+      ]
+    },
+    "pressure-driven-channel": {
+      "label": "Pressure-driven channel",
+      "classification": "benchmarked",
+      "reference": {
+        "id": "planePoiseuille",
+        "citation": "Plane Poiseuille flow: for a channel of width w with mean velocity U, u(y) = 1.5*U*(1 - (2(y-yc)/w)^2) and dp/dx = -12*mu*U/w^2.",
+        "verification": "derived"
+      },
+      "caveat": "The agreement is RESOLUTION-QUALIFIED. 0.195% at 32 cells across the channel and 0.781% at 16, but 1.389% at 12: a coarse channel flows measurably too freely. What is prescribed is also the projection variable, which approximates the true pressure to O(dt) and carries a known error layer near walls, so the pressure NUMBER at the boundary is not an engineering-grade static pressure even though the flow it drives is right.",
+      "measuredBy": "tests/test10_m4_boundary_conditions.js",
+      "claims": [
+        {
+          "quantity": "U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative)",
+          "reference": 0,
+          "measured": 0.0019531249855743173,
+          "tolerance": 0.01,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative)",
+          "reference": 0,
+          "measured": 0.007812500285755532,
+          "tolerance": 0.02,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "convergence order of the flow-rate error",
+          "reference": 2,
+          "measured": 2.0000000634247073,
+          "tolerance": 0.2,
+          "relative": false,
+          "referenceType": "analytical",
+          "result": "pass"
+        },
+        {
+          "quantity": "flux deviation inlet to outlet",
+          "reference": 0,
+          "measured": 9.113043653030672e-11,
+          "tolerance": 1e-8,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
+        },
+        {
+          "quantity": "flow-rate inlet delivered vs requested (relative)",
+          "reference": 0,
+          "measured": 0,
+          "tolerance": 1e-13,
+          "relative": false,
+          "referenceType": "invariant",
+          "result": "pass"
         }
       ]
     }
