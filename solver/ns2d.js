@@ -40,6 +40,7 @@
 // two solid cells lies inside the body; a face between a solid and a fluid
 // cell lies exactly on the body surface. See applySolidBoundaryConditions.
 
+import { compileBoundaryConditions, planMatchesGrid } from "../boundaries/compile.js";
 import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
 
 // Raised when the projection cannot deliver the incompressibility it was asked
@@ -58,86 +59,158 @@ function idxFor(grid) {
   return (i, j) => i + stride * j;
 }
 
+// Where each side's velocity components live on the staggered grid.
+//
+// This table is the whole reason the four per-side branches could be collapsed
+// into one implementation. They were duplicated because the index arithmetic
+// differs per side in a way that is genuinely asymmetric, and writing it out
+// four times was the only way to keep it straight:
+//
+//   left    normal u at ghost face i=0,    tangential v ghost at i=0,    from i=1
+//   right   normal u at face      i=nx,    tangential v ghost at i=nx+1, from i=nx
+//   bottom  normal v at ghost face j=0,    tangential u ghost at j=0,    from j=1
+//   top     normal v at face      j=ny,    tangential u ghost at j=ny+1, from j=ny
+//
+// Note the asymmetry: on the left and bottom the normal component sits at the
+// ghost index, while on the right and top it sits at the last real face and it
+// is only the TANGENTIAL ghost that lies outside. Confusing the two puts a
+// wall half a cell out of place, which still produces a plausible-looking
+// flow. tests/fixtures/golden-fields.json is what catches that.
+function sideFaces(grid, side) {
+  const { nx, ny, stride } = grid;
+  switch (side) {
+    case "left":
+      return {
+        count: ny + 2, normal: "u", tangential: "v",
+        normalIndex: (j) => stride * j,
+        normalInterior: (j) => 1 + stride * j,
+        tangentialGhost: (j) => stride * j,
+        tangentialInterior: (j) => 1 + stride * j,
+      };
+    case "right":
+      return {
+        count: ny + 2, normal: "u", tangential: "v",
+        normalIndex: (j) => nx + stride * j,
+        normalInterior: (j) => nx - 1 + stride * j,
+        tangentialGhost: (j) => nx + 1 + stride * j,
+        tangentialInterior: (j) => nx + stride * j,
+      };
+    case "bottom":
+      return {
+        count: nx + 2, normal: "v", tangential: "u",
+        normalIndex: (i) => i,
+        normalInterior: (i) => i + stride,
+        tangentialGhost: (i) => i,
+        tangentialInterior: (i) => i + stride,
+      };
+    case "top":
+      return {
+        count: nx + 2, normal: "v", tangential: "u",
+        normalIndex: (i) => i + stride * ny,
+        normalInterior: (i) => i + stride * (ny - 1),
+        tangentialGhost: (i) => i + stride * (ny + 1),
+        tangentialInterior: (i) => i + stride * ny,
+      };
+    default:
+      throw new Error(`unknown side: ${side}`);
+  }
+}
+
+// Compiled plans, cached against the specification object they came from.
+// Scenarios hand the same object in every step, so this compiles once per run.
+const planCache = new WeakMap();
+
+export function boundaryPlanFor(grid, bc) {
+  // An already-compiled plan passes straight through, so a caller that wants to
+  // inspect what is applied where can compile once and hand the plan back in.
+  if (bc?.faces && bc?.conditions) {
+    if (!planMatchesGrid(bc, grid)) {
+      throw new Error(
+        `this boundary plan was compiled for a ${bc.nx}x${bc.ny} grid, not ${grid.nx}x${grid.ny}`
+      );
+    }
+    return bc;
+  }
+  const cached = planCache.get(bc);
+  if (cached && planMatchesGrid(cached, grid)) return cached;
+  const plan = compileBoundaryConditions(grid, bc);
+  planCache.set(bc, plan);
+  return plan;
+}
+
+// One side's ghost values, for any condition on any face of it.
+//
+// Every type reduces to a choice of two values - what the normal component
+// becomes, and what the tangential ghost becomes - expressed against the index
+// table above. Written once here instead of four times:
+//
+//   wall          normal 0,               tangential reflected about the wall
+//                                         value, so the wall speed sits exactly
+//                                         on the boundary rather than half a
+//                                         cell off it
+//   freeSlip      normal 0,               tangential copied (no shear)
+//   inflow        normal prescribed,      tangential copied
+//   outflow       normal copied,          tangential copied
+//   zeroGradient  normal copied,          tangential copied
+//
+// outflow and zeroGradient are identical here and differ only in whether the
+// global flux balance rescales them.
+function applySideBoundary(grid, plan, side, u, v) {
+  const faces = sideFaces(grid, side);
+  const indices = plan.faces[side];
+  const { conditions } = plan;
+  const normal = faces.normal === "u" ? u : v;
+  const tangential = faces.tangential === "u" ? u : v;
+  const tangentialKey = faces.tangential;
+  const normalKey = faces.normal;
+
+  for (let t = 0; t < faces.count; t++) {
+    const condition = conditions[indices[t]];
+    const normalAt = faces.normalIndex(t);
+    const ghostAt = faces.tangentialGhost(t);
+    const inside = tangential[faces.tangentialInterior(t)];
+
+    switch (condition.type) {
+      case "wall":
+        normal[normalAt] = 0;
+        tangential[ghostAt] = 2 * (condition[tangentialKey] ?? 0) - inside;
+        break;
+      case "freeSlip":
+        normal[normalAt] = 0;
+        tangential[ghostAt] = inside;
+        break;
+      case "inflow":
+        normal[normalAt] = condition[normalKey];
+        tangential[ghostAt] = inside;
+        break;
+      case "outflow":
+      case "zeroGradient":
+        normal[normalAt] = normal[faces.normalInterior(t)];
+        tangential[ghostAt] = inside;
+        break;
+      default:
+        throw new Error(`Unknown ${side} BC type: ${condition.type}`);
+    }
+  }
+}
+
 export function applyVelocityBoundaryConditions(grid, bc, u, v) {
-  const { nx, ny } = grid;
-  const idx = idxFor(grid);
+  const plan = boundaryPlanFor(grid, bc);
 
-  for (let j = 0; j <= ny + 1; j++) {
-    const L = bc.left;
-    if (L.type === "wall") {
-      // Tangential velocity lives half a cell off the wall, so a wall value
-      // of vWall is imposed by reflecting about it: (v_ghost + v_1)/2 = vWall.
-      u[idx(0, j)] = 0;
-      v[idx(0, j)] = 2 * (L.v ?? 0) - v[idx(1, j)];
-    } else if (L.type === "freeSlip") {
-      u[idx(0, j)] = 0;
-      v[idx(0, j)] = v[idx(1, j)];
-    } else if (L.type === "inflow") {
-      u[idx(0, j)] = L.u;
-      v[idx(0, j)] = v[idx(1, j)];
-    } else if (L.type === "zeroGradient" || L.type === "outflow") {
-      u[idx(0, j)] = u[idx(1, j)];
-      v[idx(0, j)] = v[idx(1, j)];
-    } else {
-      throw new Error(`Unknown left BC type: ${L.type}`);
-    }
-
-    const R = bc.right;
-    if (R.type === "wall") {
-      u[idx(nx, j)] = 0;
-      v[idx(nx + 1, j)] = 2 * (R.v ?? 0) - v[idx(nx, j)];
-    } else if (R.type === "freeSlip") {
-      u[idx(nx, j)] = 0;
-      v[idx(nx + 1, j)] = v[idx(nx, j)];
-    } else if (R.type === "inflow") {
-      u[idx(nx, j)] = R.u;
-      v[idx(nx + 1, j)] = v[idx(nx, j)];
-    } else if (R.type === "zeroGradient" || R.type === "outflow") {
-      u[idx(nx, j)] = u[idx(nx - 1, j)];
-      v[idx(nx + 1, j)] = v[idx(nx, j)];
-    } else {
-      throw new Error(`Unknown right BC type: ${R.type}`);
-    }
-  }
-
-  for (let i = 0; i <= nx + 1; i++) {
-    const B = bc.bottom;
-    if (B.type === "wall") {
-      v[idx(i, 0)] = 0;
-      u[idx(i, 0)] = 2 * (B.u ?? 0) - u[idx(i, 1)];
-    } else if (B.type === "freeSlip") {
-      v[idx(i, 0)] = 0;
-      u[idx(i, 0)] = u[idx(i, 1)];
-    } else if (B.type === "inflow") {
-      v[idx(i, 0)] = B.v;
-      u[idx(i, 0)] = u[idx(i, 1)];
-    } else if (B.type === "zeroGradient" || B.type === "outflow") {
-      v[idx(i, 0)] = v[idx(i, 1)];
-      u[idx(i, 0)] = u[idx(i, 1)];
-    } else {
-      throw new Error(`Unknown bottom BC type: ${B.type}`);
-    }
-
-    const T = bc.top;
-    if (T.type === "wall") {
-      v[idx(i, ny)] = 0;
-      u[idx(i, ny + 1)] = 2 * (T.u ?? 0) - u[idx(i, ny)];
-    } else if (T.type === "freeSlip") {
-      v[idx(i, ny)] = 0;
-      u[idx(i, ny + 1)] = u[idx(i, ny)];
-    } else if (T.type === "inflow") {
-      v[idx(i, ny)] = T.v;
-      u[idx(i, ny + 1)] = u[idx(i, ny)];
-    } else if (T.type === "zeroGradient" || T.type === "outflow") {
-      v[idx(i, ny)] = v[idx(i, ny - 1)];
-      u[idx(i, ny + 1)] = u[idx(i, ny)];
-    } else {
-      throw new Error(`Unknown top BC type: ${T.type}`);
-    }
-  }
+  // The vertical sides must be done before the horizontal ones and this is not
+  // cosmetic. The four corner ghosts are written by two sides each - u at
+  // (0,0) is set by the left side at j=0 and again by the bottom side at i=0 -
+  // so the second pass wins, and the bottom side reads u at (0,1), which the
+  // left side has just written. Reordering these two loops changes the corner
+  // values. Left/right and bottom/top within a pass touch disjoint indices, so
+  // their order does not matter.
+  applySideBoundary(grid, plan, "left", u, v);
+  applySideBoundary(grid, plan, "right", u, v);
+  applySideBoundary(grid, plan, "bottom", u, v);
+  applySideBoundary(grid, plan, "top", u, v);
 
   applySolidBoundaryConditions(grid, u, v);
-  enforceGlobalFluxBalance(grid, bc, u, v);
+  enforceGlobalFluxBalance(grid, plan, u, v);
 }
 
 // No-slip on the surface of an obstacle.
@@ -203,9 +276,17 @@ export function applySolidBoundaryConditions(grid, u, v) {
 // Without this the pure-Neumann pressure problem is not solvable: a uniform
 // inlet paired with a zero-gradient outlet does not conserve mass on its own,
 // and the projection has no way to fix a global imbalance.
-function enforceGlobalFluxBalance(grid, bc, u, v) {
+function enforceGlobalFluxBalance(grid, plan, u, v) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
+  // With segments, "is this an outflow" is a property of a face rather than of
+  // a whole side, so the test is per face. The traversal and accumulation
+  // order below is unchanged from the per-side version: `net` is a running
+  // floating-point sum, and reordering it would move the last bits of every
+  // rescaled face for reasons that have nothing to do with physics.
+  const { outflowMask } = plan;
+  const isOutflow = { left: plan.faces.left, right: plan.faces.right,
+                      bottom: plan.faces.bottom, top: plan.faces.top };
 
   // Net flux counted positive *into* the domain.
   let net = 0;
@@ -216,16 +297,16 @@ function enforceGlobalFluxBalance(grid, bc, u, v) {
     const kR = idx(nx, j);
     net += u[kL] * h;
     net -= u[kR] * h;
-    if (bc.left.type === "outflow" && !solid[idx(1, j)]) faces.push({ arr: u, k: kL, sign: 1 });
-    if (bc.right.type === "outflow" && !solid[idx(nx, j)]) faces.push({ arr: u, k: kR, sign: -1 });
+    if (outflowMask[isOutflow.left[j]] && !solid[idx(1, j)]) faces.push({ arr: u, k: kL, sign: 1 });
+    if (outflowMask[isOutflow.right[j]] && !solid[idx(nx, j)]) faces.push({ arr: u, k: kR, sign: -1 });
   }
   for (let i = 1; i <= nx; i++) {
     const kB = idx(i, 0);
     const kT = idx(i, ny);
     net += v[kB] * h;
     net -= v[kT] * h;
-    if (bc.bottom.type === "outflow" && !solid[idx(i, 1)]) faces.push({ arr: v, k: kB, sign: 1 });
-    if (bc.top.type === "outflow" && !solid[idx(i, ny)]) faces.push({ arr: v, k: kT, sign: -1 });
+    if (outflowMask[isOutflow.bottom[i]] && !solid[idx(i, 1)]) faces.push({ arr: v, k: kB, sign: 1 });
+    if (outflowMask[isOutflow.top[i]] && !solid[idx(i, ny)]) faces.push({ arr: v, k: kT, sign: -1 });
   }
 
   if (faces.length === 0) return;
