@@ -136,6 +136,77 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }) {
   };
 }
 
+// M4 - a channel driven by a pressure difference rather than a prescribed
+// velocity. Nothing sets the flow rate here: the projection works it out from
+// the pressure drop, and the steady answer is the one plane Poiseuille
+// predicts. This is the configuration validated in tests/test10 and recorded
+// in the validation registry.
+function pressureChannel() {
+  const w = 1;
+  const cpw = 24;
+  const L = 6;
+  const h = w / cpw;
+  const nu = 0.05;
+  const dp = 3.6;
+  const grid = new StaggeredGrid(Math.round(L / h), cpw, h);
+  // U_mean = dp*w^2/(12*mu*L), which is 1 for these numbers.
+  const U = (dp * w * w) / (12 * nu * L);
+  return {
+    id: "pressure-channel",
+    label: "Pressure-driven channel",
+    note:
+      "M4 - pressure prescribed at both ends, no-slip walls. The flow rate is an " +
+      "output, not an input: it settles at the plane Poiseuille value for this " +
+      "pressure drop.",
+    grid,
+    bc: {
+      left: { type: "pressure", p: dp },
+      right: { type: "pressure", p: 0 },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+    params: { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 },
+    timestep: { safety: DEFAULT_SAFETY },
+    Re: Math.round((U * w) / nu),
+  };
+}
+
+// M4 - a segmented boundary: the left wall is mostly solid with a flow-rate
+// inlet across its middle third. There is no way to say this with one condition
+// per side, which is what segments are for.
+function segmentedJet() {
+  const w = 1;
+  const cpw = 20;
+  const h = w / cpw;
+  const nx = Math.round(5 / h);
+  const ny = cpw;
+  const nu = 0.004;
+  const Q = 0.3;
+  const grid = new StaggeredGrid(nx, ny, h);
+  return {
+    id: "jet",
+    label: "Jet from a segmented inlet",
+    note:
+      "M4 - the left boundary is wall, then a parabolic flow-rate inlet across " +
+      "its middle third, then wall again. The inlet delivers exactly its stated " +
+      "rate through the open part.",
+    grid,
+    bc: {
+      left: [
+        { from: 0, to: w / 3, type: "wall" },
+        { from: w / 3, to: (2 * w) / 3, type: "flowInlet", flowRate: Q, profile: "parabolic" },
+        { from: (2 * w) / 3, to: w, type: "wall" },
+      ],
+      right: { type: "outflow" },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+    params: { nu, rho: 1, divergenceTol: 1e-7, poissonMaxIterations: 20000 },
+    timestep: { safety: DEFAULT_SAFETY },
+    Re: Math.round((((Q / (w / 3)) * w) / 3) / nu),
+  };
+}
+
 // Labels are carried on the entry rather than read out of a built scenario, so
 // listing the menu does not mean allocating four grids and stamping four masks.
 export const SCENARIOS = [
@@ -163,6 +234,8 @@ export const SCENARIOS = [
   },
   { id: "cylinder", label: "Flow past a cylinder (Re 100)", build: cylinderInChannel },
   { id: "cavity", label: "Lid-driven cavity (Re 1000)", build: lidDrivenCavity },
+  { id: "pressure-channel", label: "Pressure-driven channel", build: pressureChannel },
+  { id: "jet", label: "Jet from a segmented inlet", build: segmentedJet },
 ];
 
 export const DEFAULT_SCENARIO = "bend-sharp";

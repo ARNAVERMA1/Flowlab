@@ -18,6 +18,10 @@ import { FIXTURE_CASES, measureFixtureCase } from "./support/boundaryFixtures.js
 import { StaggeredGrid } from "../geometry/grid.js";
 import { step, boundaryPlanFor } from "../solver/ns2d.js";
 import { compileBoundaryConditions } from "../boundaries/compile.js";
+import { SCENARIOS, buildScenario } from "../scenarios/index.js";
+import {
+  boundaryBands, boundaryColour, boundaryLegend, measureBoundaryFlux,
+} from "../visualization/boundaryOverlay.js";
 
 const GOLDEN = JSON.parse(
   readFileSync(new URL("./fixtures/golden-fields.json", import.meta.url), "utf8")
@@ -560,5 +564,159 @@ test("M4 - a pressure boundary makes the pressure problem non-singular", () => {
   console.log(
     `[M4 pressure] driven box: mean p ${mean.toFixed(4)} (not projected to zero), ` +
     `prescribed value recovered on the face to ${Math.abs(onFace - 1).toExponential(1)}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Showing which condition is applied where
+// ---------------------------------------------------------------------------
+
+test("M4 - the overlay is derived from the plan the solver reads", () => {
+  // The requirement has a trap in it: the obvious implementation reads the
+  // specification and works out where each condition lands, which is a second
+  // implementation of the rule the compiler already applies. The two drift,
+  // and the drift is invisible because the picture is the only one anyone
+  // looks at. So the bands are checked against the compiled face array, cell
+  // by cell, rather than against the specification that produced it.
+  const grid = new StaggeredGrid(12, 12, 1 / 12);
+  const plan = compileBoundaryConditions(grid, {
+    left: [
+      { from: 0, to: 1 / 3, type: "wall" },
+      { from: 1 / 3, to: 2 / 3, type: "flowInlet", flowRate: 1 },
+      { from: 2 / 3, to: 1, type: "wall" },
+    ],
+    right: { type: "outflow" },
+    top: { type: "wall", u: 1 },
+    bottom: { type: "wall" },
+  });
+
+  const layout = { originX: 10, originY: 10, scale: 5, band: 6 };
+  const bands = boundaryBands(plan, layout);
+  const left = bands.filter((b) => b.side === "left");
+  assert.equal(left.length, 3, "three segments should produce three bands");
+
+  // Every pixel row of every left band must name the condition the solver has
+  // at the face that row covers.
+  const height = plan.ny * layout.scale;
+  for (const band of left) {
+    for (let py = band.y + 0.5; py < band.y + band.h; py += layout.scale) {
+      // Invert the canvas mapping: physical y runs up, canvas y runs down.
+      const j = Math.round((layout.originY + height - py) / layout.scale + 0.5);
+      assert.equal(
+        plan.faces.left[j],
+        band.conditionIndex,
+        `band at canvas y=${py} claims condition ${band.conditionIndex} but face ${j} has ${plan.faces.left[j]}`
+      );
+    }
+  }
+
+  // Bands sit outside the field, never over it.
+  for (const band of bands) {
+    const insideX = band.x >= layout.originX && band.x + band.w <= layout.originX + plan.nx * layout.scale;
+    const insideY = band.y >= layout.originY && band.y + band.h <= layout.originY + height;
+    assert.ok(!(insideX && insideY), `a ${band.side} band overlaps the field`);
+  }
+  console.log(`[M4 overlay] ${bands.length} bands, every pixel row agreeing with the compiled face array`);
+});
+
+test("M4 - a moving wall is coloured differently from a stationary one", () => {
+  // The single most important thing to notice about a lid-driven cavity is
+  // which wall is driving it, and "wall" on all four sides does not say.
+  const stationary = boundaryColour({ type: "wall" }, "top");
+  const moving = boundaryColour({ type: "wall", u: 1 }, "top");
+  assert.notEqual(stationary, moving);
+  // A "moving" wall whose tangential speed is zero is a stationary wall.
+  assert.equal(boundaryColour({ type: "wall", u: 0 }, "top"), stationary);
+  // And the component that counts differs by side: v moves a vertical wall.
+  assert.equal(boundaryColour({ type: "wall", v: 1 }, "left"), moving);
+  assert.equal(boundaryColour({ type: "wall", v: 1 }, "top"), stationary);
+});
+
+test("M4 - measured boundary flux is measured, and balances", () => {
+  // Reading the flux back off the specification would make the panel a mirror
+  // for what was typed in. Measuring it means a flow-rate inlet can be checked
+  // against its promise, and a pressure boundary - where nothing was specified
+  // - has something to report at all.
+  const Q = 0.6;
+  const setup = channel({
+    cpw: 16,
+    bc: {
+      left: { type: "flowInlet", flowRate: Q, profile: "parabolic" },
+      right: { type: "outflow" },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+  });
+  for (let n = 0; n < 200; n++) step(setup.grid, setup.bc, setup.params);
+  const plan = boundaryPlanFor(setup.grid, setup.bc);
+  const flux = measureBoundaryFlux(setup.grid, plan);
+
+  assert.ok(Math.abs(flux.left.flux - Q) < 1e-12, `inlet measured ${flux.left.flux}, promised ${Q}`);
+  assert.ok(Math.abs(flux.right.flux + Q) < 1e-8, `outlet measured ${flux.right.flux}`);
+  assert.ok(Math.abs(flux.top.flux) < 1e-15 && Math.abs(flux.bottom.flux) < 1e-15, "walls must pass nothing");
+  assert.ok(Math.abs(flux.net) < 1e-8, `net flux ${flux.net} - an incompressible domain must balance`);
+
+  // A pressure boundary reports a flux nobody prescribed.
+  const driven = channel({
+    cpw: 16,
+    bc: {
+      left: { type: "pressure", p: 3.6 },
+      right: { type: "pressure", p: 0 },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+  });
+  const steps = Math.round(30 / driven.params.dt);
+  for (let n = 0; n < steps; n++) step(driven.grid, driven.bc, driven.params);
+  const drivenFlux = measureBoundaryFlux(driven.grid, boundaryPlanFor(driven.grid, driven.bc));
+  assert.ok(drivenFlux.left.flux > 0.9, `pressure inlet carried ${drivenFlux.left.flux}`);
+  assert.ok(Math.abs(drivenFlux.net) < 1e-8, `net flux ${drivenFlux.net}`);
+  console.log(
+    `[M4 overlay] flow inlet measured ${flux.left.flux.toFixed(12)} against a promised ${Q}; ` +
+    `pressure channel carried ${drivenFlux.left.flux.toFixed(6)} with nothing prescribing it`
+  );
+});
+
+test("M4 - a broken field cannot report a plausible boundary flux", () => {
+  // Same rule as everywhere else in the display layer: count non-finite
+  // entries, never skip them into a comparison or a sum.
+  const grid = new StaggeredGrid(8, 8, 0.125);
+  grid.u.fill(1);
+  const plan = boundaryPlanFor(grid, {
+    left: { type: "inflow", u: 1 }, right: { type: "outflow" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+  });
+  assert.ok(Number.isFinite(measureBoundaryFlux(grid, plan).left.flux));
+  grid.u[grid.idx(0, 4)] = NaN;
+  const broken = measureBoundaryFlux(grid, plan);
+  assert.ok(Number.isNaN(broken.left.flux), "a NaN on the boundary must poison its flux");
+  assert.equal(broken.left.nonFiniteCells, 1);
+});
+
+test("M4 - every harness scenario compiles and is covered by the overlay", () => {
+  // A scenario the panel cannot describe would leave a viewer looking at bands
+  // with no legend, which is worse than no bands.
+  for (const entry of SCENARIOS) {
+    const scenario = buildScenario(entry.id);
+    const plan = boundaryPlanFor(scenario.grid, scenario.bc);
+    const legend = boundaryLegend(plan);
+    assert.ok(legend.length > 0, `${entry.id}: no legend rows`);
+    for (const row of legend) {
+      assert.ok(row.label && row.colour, `${entry.id}: incomplete legend row`);
+      assert.notEqual(row.colour, "#ff00aa", `${entry.id}: ${row.condition.type} has no colour assigned`);
+    }
+    // Every face of every side must be covered by exactly one band.
+    const covered = { left: 0, right: 0, bottom: 0, top: 0 };
+    for (const row of legend) covered[row.side] += row.cells;
+    for (const side of ["left", "right", "bottom", "top"]) {
+      assert.equal(covered[side], plan.sides[side].cells, `${entry.id}: ${side} not fully covered`);
+    }
+  }
+  console.log(
+    "[M4 overlay] " +
+    SCENARIOS.map((s) => {
+      const plan = boundaryPlanFor(buildScenario(s.id).grid, buildScenario(s.id).bc);
+      return `${s.id}=${boundaryLegend(plan).length} rows`;
+    }).join(", ")
   );
 });

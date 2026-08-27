@@ -84,6 +84,12 @@
   .vnote { color: var(--ink-dim); font-size: 11px; margin: 8px 0 0; line-height: 1.45; }
   .vnote.bad { color: #ffc2d3; }
   .legend .ends span:nth-child(2) { color: var(--ink-dim); }
+  .bcrow { display: flex; align-items: baseline; gap: 7px; margin: 3px 0; font-size: 12px; }
+  .bcrow .sw { flex: none; position: relative; top: 1px; }
+  .bcside { color: var(--ink-dim); width: 44px; flex: none; }
+  .bctext { display: flex; flex-direction: column; }
+  .bcextent { color: var(--ink-dim); font-size: 11px; }
+  .bcflux { margin-top: 10px; }
   .tag {
     text-transform: none; letter-spacing: 0; font-weight: 500;
     color: #7fb07f; border: 1px solid #3d5a3d; border-radius: 3px;
@@ -132,6 +138,19 @@
           <dt>reference is</dt><dd id="vrefstatus">-</dd>
         </dl>
         <div id="vdetail"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Boundary conditions</h2>
+        <div id="bclist"></div>
+        <dl class="bcflux">
+          <dt>flux in</dt><dd id="bcflux">-</dd>
+          <dt>net</dt><dd id="bcnet">-</dd>
+        </dl>
+        <p class="vnote">Bands around the field show where each condition is
+        applied, drawn from the same compiled data the solver reads. Flux is
+        measured from the velocity field, positive into the domain; the net must
+        be zero for an incompressible domain.</p>
       </div>
 
       <div class="panel">

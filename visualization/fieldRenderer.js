@@ -30,7 +30,12 @@ export class FieldRenderer {
   // computing a range here keeps a single scan as the one authority on the
   // field's range and its health - the renderer cannot quietly disagree with
   // the legend or the readouts about how bright the picture should be.
-  render(grid, view) {
+  // `inset` is the margin in display pixels around the field, where the
+  // boundary-condition bands are drawn. The bands go beside the field rather
+  // than over its outermost cells because those cells hold the boundary layer,
+  // which is the part of the picture the boundary condition is most
+  // responsible for - covering it to label it would be a poor trade.
+  render(grid, view, inset = 0) {
     const { nx, ny } = grid;
 
     if (this.buffer.width !== nx || this.buffer.height !== ny) {
@@ -70,6 +75,12 @@ export class FieldRenderer {
     const target = this.context;
     target.imageSmoothingEnabled = false;
     target.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    target.drawImage(this.buffer, 0, 0, this.canvas.width, this.canvas.height);
+    target.drawImage(
+      this.buffer,
+      inset,
+      inset,
+      this.canvas.width - 2 * inset,
+      this.canvas.height - 2 * inset
+    );
   }
 }

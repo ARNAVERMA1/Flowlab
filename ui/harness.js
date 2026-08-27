@@ -23,11 +23,16 @@
 // see tracer/passiveScalar.js for how that separation is enforced and
 // tests/test9_m3_visualization.js for the assertion that it holds.
 
-import { step, computeDivergence, SolverDivergenceError } from "../solver/ns2d.js";
+import {
+  step, computeDivergence, boundaryPlanFor, SolverDivergenceError,
+} from "../solver/ns2d.js";
 import { computeStableTimestep, SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { FieldRenderer } from "../visualization/fieldRenderer.js";
 import { samplerCss } from "../visualization/colormap.js";
+import {
+  drawBoundaryOverlay, boundaryLegend, measureBoundaryFlux,
+} from "../visualization/boundaryOverlay.js";
 import {
   prepareView,
   FIELD_SOURCES,
@@ -40,8 +45,19 @@ import { assessField } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
 
+function escapeHtml(text) {
+  return String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
 const STEPS_PER_FRAME = 4;
 const FRAME_BUDGET_MS = 24;
+
+// Width of the boundary-condition bands, and the margin they live in. The
+// bands sit BESIDE the field, not over its edge: the outermost cells carry the
+// boundary layer, which is the part of the picture the boundary condition is
+// most responsible for, and covering it to label it would be a poor trade.
+const BAND = 7;
+const MARGIN = BAND + 2;
 
 export class Harness {
   constructor(root) {
@@ -125,6 +141,11 @@ export class Harness {
     this.state = "paused";
 
     const { grid } = this.scenario;
+    // Compiled once per load and handed to both the solver and the overlay, so
+    // the picture of what is applied where cannot disagree with what is
+    // applied. Compiling separately for the display would be two
+    // implementations of one rule.
+    this.plan = boundaryPlanFor(grid, this.scenario.bc);
     this.tracer = new PassiveTracer(grid);
     this.tracerConfig = tracerConfigFor(id);
     this.seedTracer();
@@ -138,9 +159,10 @@ export class Harness {
     this.root.querySelector("#dyenote").textContent = this.tracerConfig.note;
 
     const canvas = this.root.querySelector("#field");
-    const scale = Math.max(1, Math.min(9, Math.floor(760 / grid.nx)));
-    canvas.width = grid.nx * scale;
-    canvas.height = grid.ny * scale;
+    const scale = Math.max(1, Math.min(9, Math.floor((760 - 2 * MARGIN) / grid.nx)));
+    this.scale = scale;
+    canvas.width = grid.nx * scale + 2 * MARGIN;
+    canvas.height = grid.ny * scale + 2 * MARGIN;
 
     this.root.querySelector("#note").textContent = this.scenario.note;
     this.validation.render(id);
@@ -236,7 +258,13 @@ export class Harness {
     }
 
     const view = prepareView(this.mode, { grid, tracer: this.tracer });
-    this.renderer.render(grid, view);
+    this.renderer.render(grid, view, MARGIN);
+    drawBoundaryOverlay(this.renderer.context, this.plan, {
+      originX: MARGIN,
+      originY: MARGIN,
+      scale: this.scale,
+      band: BAND,
+    });
     this.updateReadouts(inspection, divergence, health, view);
   }
 
@@ -297,6 +325,7 @@ export class Harness {
     root.querySelector("#pause").disabled = this.state !== "running";
 
     this.updateTracerReadouts();
+    this.updateBoundaryPanel();
     this.updateLegend(view);
   }
 
@@ -323,6 +352,53 @@ export class Harness {
     // Shown because a silent substep would hide exactly the situation the
     // separate constraint exists to handle.
     set("#dyesubsteps", advection ? integer(advection.substeps) : "-");
+  }
+
+  // The boundary panel. Every row is derived from the compiled plan, and the
+  // flux beside it is MEASURED from the velocity field rather than read back
+  // off the specification - which is the whole point on a pressure boundary,
+  // where nothing was specified and the flux is the answer.
+  updateBoundaryPanel() {
+    const list = this.root.querySelector("#bclist");
+    const signature = this.scenarioId;
+    if (list.dataset.builtFor !== signature) {
+      list.innerHTML = "";
+      for (const entry of boundaryLegend(this.plan)) {
+        const row = document.createElement("div");
+        row.className = "bcrow";
+        const extent =
+          entry.spans.length === 1 && entry.cells === this.plan.sides[entry.side].cells
+            ? "whole side"
+            : entry.spans
+                .map((s) => `${fixed(s.from, 2)}-${fixed(s.to, 2)}`)
+                .join(", ");
+        row.innerHTML =
+          `<i class="sw" style="background:${entry.colour}"></i>` +
+          `<span class="bcside">${entry.side}</span>` +
+          `<span class="bctext">${escapeHtml(entry.label)}` +
+          `<span class="bcextent">${escapeHtml(extent)}</span></span>`;
+        list.appendChild(row);
+      }
+      list.dataset.builtFor = signature;
+    }
+
+    const flux = measureBoundaryFlux(this.scenario.grid, this.plan);
+    const set = (id, text, bad = false) => {
+      const node = this.root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+    set(
+      "#bcflux",
+      ["left", "right", "bottom", "top"]
+        .map((side) => `${side[0]} ${exponential(flux[side].flux, 2)}`)
+        .join("  "),
+      ["left", "right", "bottom", "top"].some((side) => isBad(flux[side].flux))
+    );
+    // Net flux is the quantity that must be zero for an incompressible domain.
+    // Shown because a boundary specification that does not balance is a real
+    // error, and this is where it becomes visible.
+    set("#bcnet", exponential(flux.net, 2), isBad(flux.net) || Math.abs(flux.net) > 1e-6);
   }
 
   updateLegend(view) {

@@ -248,6 +248,41 @@ export const CASES = [
       { quantity: "radiusing suppresses the separation", reference: null, tolerance: null, referenceType: "physical-reasoning" },
     ],
   },
+  {
+    id: "pressure-driven-channel",
+    label: "Pressure-driven channel",
+    classification: "benchmarked",
+    measuredBy: "tests/test10_m4_boundary_conditions.js",
+    reference: "planePoiseuille",
+    rationale:
+      "The M4 pressure boundary condition checked against closed form. Nothing " +
+      "prescribes the flow rate here: the pressure is fixed at both ends, the " +
+      "projection determines the velocity through them, and the steady answer " +
+      "must be U_mean = dp*w^2/(12*mu*L). That makes it a genuine prediction " +
+      "rather than a restatement of an input, which is what separates this from " +
+      "the velocity-inlet cases. The convergence ORDER carries more weight here " +
+      "than any single error figure: a wrongly implemented boundary can be " +
+      "accidentally close on one grid, but it does not converge at second order " +
+      "to the right answer. The residual is the no-slip WALL treatment rather " +
+      "than the pressure ends - reflecting no-slip into the ghost is exact for a " +
+      "linear profile and O(h^2) for a parabolic one - which is why the local " +
+      "dp/dx error tracks the global rate error to three digits.",
+    caveat:
+      "The agreement is RESOLUTION-QUALIFIED. 0.195% at 32 cells across the " +
+      "channel and 0.781% at 16, but 1.389% at 12: a coarse channel flows " +
+      "measurably too freely. What is prescribed is also the projection " +
+      "variable, which approximates the true pressure to O(dt) and carries a " +
+      "known error layer near walls, so the pressure NUMBER at the boundary is " +
+      "not an engineering-grade static pressure even though the flow it drives " +
+      "is right.",
+    claims: [
+      { quantity: "U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative)", reference: 0, tolerance: 0.01, referenceType: "analytical" },
+      { quantity: "U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative)", reference: 0, tolerance: 0.02, referenceType: "analytical" },
+      { quantity: "convergence order of the flow-rate error", reference: 2, tolerance: 0.2, referenceType: "analytical" },
+      { quantity: "flux deviation inlet to outlet", reference: 0, tolerance: 1e-8, referenceType: "invariant" },
+      { quantity: "flow-rate inlet delivered vs requested (relative)", reference: 0, tolerance: 1e-13, referenceType: "invariant" },
+    ],
+  },
 ];
 
 // Harness scenarios map onto cases. A scenario the panel can show but that no
@@ -258,6 +293,9 @@ export const SCENARIO_VALIDATION = {
   "bend-smooth": { case: "channel-bend" },
   cylinder: { case: "cylinder-wake" },
   cavity: { case: "lid-driven-cavity" },
+  "pressure-channel": { case: "pressure-driven-channel" },
+  // The segmented jet demonstrates the M4 boundary model; no case validates the
+  // jet itself, so the panel will correctly call it a demonstration.
 };
 
 export function caseById(id) {

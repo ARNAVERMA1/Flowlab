@@ -228,6 +228,82 @@ function measureBend() {
   ];
 }
 
+// M4 - the pressure boundary against closed form. This one drives the solver
+// directly rather than through a tests/support harness, because no such
+// harness existed before M4 and the configuration is three lines.
+function measurePressureChannel() {
+  const w = 1;
+  const L = 6;
+  const nu = 0.05;
+  const dp = 3.6;
+  const expected = (dp * w * w) / (12 * nu * L);
+
+  const runChannel = (cpw, bc, settleTime) => {
+    const h = w / cpw;
+    const grid = new StaggeredGrid(Math.round(L / h), cpw, h);
+    const params = {
+      nu, rho: 1,
+      dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 2),
+      divergenceTol: 1e-7,
+      poissonMaxIterations: 20000,
+    };
+    const steps = Math.round(settleTime / params.dt);
+    for (let n = 0; n < steps; n++) step(grid, bc, params);
+    const flux = (i) => {
+      let q = 0;
+      for (let j = 1; j <= grid.ny; j++) q += grid.u[grid.idx(i, j)] * h;
+      return q;
+    };
+    return { grid, flux };
+  };
+
+  const driven = {
+    left: { type: "pressure", p: dp },
+    right: { type: "pressure", p: 0 },
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  };
+
+  const coarse = runChannel(16, driven, 50);
+  const fine = runChannel(32, driven, 50);
+  const errorAt = (r) => (r.flux(Math.round(r.grid.nx / 2)) / w - expected) / expected;
+  const coarseError = errorAt(coarse);
+  const fineError = errorAt(fine);
+
+  // A flow-rate inlet on the same geometry, for the exactness claim.
+  const Q = 0.6;
+  const metered = runChannel(16, {
+    left: { type: "flowInlet", flowRate: Q, profile: "parabolic" },
+    right: { type: "outflow" },
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  }, 5);
+
+  return [
+    {
+      quantity: "U_mean vs dp*w^2/(12*mu*L) at 32 cells (relative)",
+      measured: fineError,
+      context: `U_mean = ${(fine.flux(Math.round(fine.grid.nx / 2)) / w).toFixed(6)} against ${expected.toFixed(6)}`,
+    },
+    { quantity: "U_mean vs dp*w^2/(12*mu*L) at 16 cells (relative)", measured: coarseError },
+    {
+      quantity: "convergence order of the flow-rate error",
+      measured: Math.log2(Math.abs(coarseError) / Math.abs(fineError)),
+      context: "second order is what a correct boundary treatment gives",
+    },
+    {
+      quantity: "flux deviation inlet to outlet",
+      measured: Math.abs(fine.flux(0) - fine.flux(fine.grid.nx)),
+      context: "the flux is an output here, so its constancy is a real check",
+    },
+    {
+      quantity: "flow-rate inlet delivered vs requested (relative)",
+      measured: Math.abs(metered.flux(0) - Q) / Q,
+      context: `asked for ${Q}, delivered ${metered.flux(0).toFixed(15)}`,
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -235,6 +311,7 @@ const MEASURERS = {
   "lid-driven-cavity": measureCavity,
   "cylinder-wake": measureCylinder,
   "channel-bend": measureBend,
+  "pressure-driven-channel": measurePressureChannel,
 };
 
 export async function measureCase(caseId) {

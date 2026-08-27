@@ -227,6 +227,15 @@ async function main() {
     "Chorin projection pressure, which is not the true pressure near walls."
   );
   lines.push("");
+  lines.push(
+    "From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient " +
+    "with a global flux rescale, which reflects vortices back into the domain - " +
+    "adequate for the steady cases validated here, and a real limitation for " +
+    "unsteady wakes. A convective outflow was deferred rather than adopted, " +
+    "because changing it would perturb the cylinder benchmark. Obstacle surfaces " +
+    "carry uniform no-slip and are not configurable."
+  );
+  lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
   if (unverified.length) {
     lines.push(
