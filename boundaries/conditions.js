@@ -49,6 +49,8 @@ export function tangentialComponent(side) {
   return SIDE_ORIENTATION[side] === "vertical" ? "v" : "u";
 }
 
+export const FLOW_PROFILES = ["uniform", "parabolic"];
+
 export const BOUNDARY_TYPES = {
   wall: {
     label: "Wall",
@@ -92,6 +94,24 @@ export const BOUNDARY_TYPES = {
     },
   },
 
+  flowInlet: {
+    label: "Flow-rate inlet",
+    family: "inlet",
+    summary:
+      "Prescribed volumetric flow rate rather than a velocity. The profile is " +
+      "scaled so the flux through the OPEN part of the segment integrates to " +
+      "exactly the requested rate - an inlet partly blocked by an obstacle " +
+      "delivers the rate it was asked for through what is left, rather than " +
+      "quietly delivering less.",
+    required: () => ["flowRate"],
+    optional: (side) => ["profile", tangentialComponent(side)],
+    describe(condition, side) {
+      const across = SIDE_ORIENTATION[side] === "vertical" ? "dy" : "dx";
+      const n = normalComponent(side);
+      return `${condition.profile ?? "uniform"}, integral ${n} ${across} = ${condition.flowRate}`;
+    },
+  },
+
   outflow: {
     label: "Outlet",
     family: "outlet",
@@ -102,6 +122,23 @@ export const BOUNDARY_TYPES = {
       "conserve mass, and the projection has no way to fix a global imbalance.",
     optional: () => [],
     describe: () => "zero gradient, flux balanced",
+  },
+
+  pressure: {
+    label: "Pressure boundary",
+    family: "pressure",
+    summary:
+      "Prescribed pressure, with the velocity through the boundary left free " +
+      "for the projection to determine. Unlike every other condition here this " +
+      "changes the CHARACTER of the pressure solve: it replaces the pure " +
+      "Neumann problem, which is singular up to a constant and requires the " +
+      "total inflow and outflow to match, with one that has a unique solution " +
+      "and determines its own flux. What is prescribed is the projection " +
+      "variable, which approximates the true pressure to O(dt) - see " +
+      "docs/M4-boundary-conditions.md before reading absolute values off it.",
+    required: () => ["p"],
+    optional: () => [],
+    describe: (condition) => `p = ${condition.p}`,
   },
 
   zeroGradient: {

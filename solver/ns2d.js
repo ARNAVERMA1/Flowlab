@@ -150,6 +150,7 @@ export function boundaryPlanFor(grid, bc) {
 //                                         cell off it
 //   freeSlip      normal 0,               tangential copied (no shear)
 //   inflow        normal prescribed,      tangential copied
+//   flowInlet     normal from the compiled profile, tangential copied
 //   outflow       normal copied,          tangential copied
 //   zeroGradient  normal copied,          tangential copied
 //
@@ -159,6 +160,7 @@ function applySideBoundary(grid, plan, side, u, v) {
   const faces = sideFaces(grid, side);
   const indices = plan.faces[side];
   const { conditions } = plan;
+  const profile = plan.profiles[side];
   const normal = faces.normal === "u" ? u : v;
   const tangential = faces.tangential === "u" ? u : v;
   const tangentialKey = faces.tangential;
@@ -181,6 +183,20 @@ function applySideBoundary(grid, plan, side, u, v) {
         break;
       case "inflow":
         normal[normalAt] = condition[normalKey];
+        tangential[ghostAt] = inside;
+        break;
+      case "pressure":
+        // A predictor only. The normal velocity here is a genuine degree of
+        // freedom - the projection sets it from the pressure gradient in
+        // correctVelocities - so this just needs a sane value for the
+        // divergence that drives the solve.
+        normal[normalAt] = normal[faces.normalInterior(t)];
+        tangential[ghostAt] = inside;
+        break;
+      case "flowInlet":
+        // The per-face velocity was worked out at compile time, where the open
+        // length of the segment is known. Here it is just a lookup.
+        normal[normalAt] = profile[t];
         tangential[ghostAt] = inside;
         break;
       case "outflow":
@@ -325,22 +341,41 @@ function enforceGlobalFluxBalance(grid, plan, u, v) {
 // Poisson solve does not read these ghost values (see the reduced-diagonal
 // treatment below); they are maintained so the stored field is consistent
 // for anything that reads it.
-export function applyPressureBoundaryConditions(grid) {
+export function applyPressureBoundaryConditions(grid, bc) {
   const { nx, ny, p } = grid;
   const idx = idxFor(grid);
+  const plan = bc === undefined ? null : boundaryPlanFor(grid, bc);
+
+  // Without a pressure boundary this is exactly the previous zero-gradient
+  // pass. With one, the prescribed value sits ON the boundary face, halfway
+  // between the last cell and the ghost, so the ghost is reflected about it:
+  // p_ghost = 2*p_boundary - p_interior. Setting the ghost to p_boundary
+  // directly would place the condition half a cell outside the domain - the
+  // same half-cell error as a mishandled moving wall, and just as invisible.
+  const ghost = (index, interior, sideFaces, t) => {
+    if (plan && plan.hasPressure) {
+      const condition = plan.conditions[sideFaces[t]];
+      if (condition.type === "pressure") {
+        p[index] = 2 * condition.p - p[interior];
+        return;
+      }
+    }
+    p[index] = p[interior];
+  };
+
   for (let j = 1; j <= ny; j++) {
-    p[idx(0, j)] = p[idx(1, j)];
-    p[idx(nx + 1, j)] = p[idx(nx, j)];
+    ghost(idx(0, j), idx(1, j), plan?.faces.left, j);
+    ghost(idx(nx + 1, j), idx(nx, j), plan?.faces.right, j);
   }
   for (let i = 1; i <= nx; i++) {
-    p[idx(i, 0)] = p[idx(i, 1)];
-    p[idx(i, ny + 1)] = p[idx(i, ny)];
+    ghost(idx(i, 0), idx(i, 1), plan?.faces.bottom, i);
+    ghost(idx(i, ny + 1), idx(i, ny), plan?.faces.top, i);
   }
 }
 
 export function applyBoundaryConditions(grid, bc) {
   applyVelocityBoundaryConditions(grid, bc, grid.u, grid.v);
-  applyPressureBoundaryConditions(grid);
+  applyPressureBoundaryConditions(grid, bc);
 }
 
 function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
@@ -396,15 +431,18 @@ function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
   }
 }
 
-function computeRHS(grid, F, G, dt, rho, rhs) {
+function computeRHS(grid, F, G, dt, rho, rhs, cells) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
+  const { dirichletRHS } = cells;
+  const h2 = h * h;
   for (let j = 1; j <= ny; j++) {
     for (let i = 1; i <= nx; i++) {
       const k = idx(i, j);
       if (solid[k]) { rhs[k] = 0; continue; }
       const div = (F[k] - F[idx(i - 1, j)]) / h + (G[k] - G[idx(i, j - 1)]) / h;
-      rhs[k] = (rho / dt) * div;
+      // The known 2*p_b/h^2 from each Dirichlet face - see scratchFor.
+      rhs[k] = (rho / dt) * div - (dirichletRHS === null ? 0 : dirichletRHS[k] / h2);
     }
   }
 }
@@ -456,7 +494,7 @@ function computeRHS(grid, F, G, dt, rho, rhs) {
 function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations }) {
   const { h, p } = grid;
   const h2 = h * h;
-  const { fluid, offsets, counts, work } = cells;
+  const { fluid, offsets, counts, work, singular } = cells;
   const n = fluid.length;
   const { r, d, Ad } = work;
 
@@ -475,7 +513,11 @@ function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations }) 
     }
   };
 
+  // Only the pure-Neumann problem has a constant null space to remove. With a
+  // prescribed pressure the solution is unique, and subtracting the mean would
+  // be discarding part of the answer rather than a spurious mode.
   const projectToZeroMean = (a) => {
+    if (!singular) return;
     let total = 0;
     for (let m = 0; m < n; m++) total += a[fluid[m]];
     const mean = total / n;
@@ -556,7 +598,7 @@ function solvePressurePoisson(grid, rhs, cells, { residualTol, maxIterations }) 
 // would break that: an extrapolating outflow condition would recompute
 // u[nx] from the just-corrected u[nx-1] and reintroduce divergence in the
 // outlet column.
-function correctVelocities(grid, F, G, dt, rho) {
+function correctVelocities(grid, F, G, dt, rho, plan) {
   const { nx, ny, h, u, v, p, solid } = grid;
   const idx = idxFor(grid);
 
@@ -577,6 +619,40 @@ function correctVelocities(grid, F, G, dt, rho) {
       v[k] = G[k] - (dt / rho) * (p[idx(i, j + 1)] - p[k]) / h;
     }
   }
+
+  // Boundary faces are normally prescribed, so the loops above skip them. A
+  // pressure face is the exception: the velocity through it is unknown and the
+  // pressure gradient across it is what sets it.
+  //
+  // The gradient uses the reflected ghost, p_g = 2*p_b - p_interior, so it
+  // comes out as twice the difference between the boundary value and the
+  // adjacent cell over h. That factor of two is not a fudge - it is the
+  // half-cell between the last pressure node and the face where the condition
+  // is imposed, and it is exactly what makes the divergence of the corrected
+  // field equal the Laplacian assembled in scratchFor. The identity behind the
+  // divergence check in step() depends on the two agreeing.
+  if (!plan?.hasPressure) return;
+  const scale = (2 * dt) / (rho * h);
+  for (let j = 1; j <= ny; j++) {
+    if (plan.pressureMask[plan.faces.left[j]] && !solid[idx(1, j)]) {
+      const k = idx(0, j);
+      u[k] = F[k] - scale * (p[idx(1, j)] - plan.conditions[plan.faces.left[j]].p);
+    }
+    if (plan.pressureMask[plan.faces.right[j]] && !solid[idx(nx, j)]) {
+      const k = idx(nx, j);
+      u[k] = F[k] - scale * (plan.conditions[plan.faces.right[j]].p - p[idx(nx, j)]);
+    }
+  }
+  for (let i = 1; i <= nx; i++) {
+    if (plan.pressureMask[plan.faces.bottom[i]] && !solid[idx(i, 1)]) {
+      const k = idx(i, 0);
+      v[k] = G[k] - scale * (p[idx(i, 1)] - plan.conditions[plan.faces.bottom[i]].p);
+    }
+    if (plan.pressureMask[plan.faces.top[i]] && !solid[idx(i, ny)]) {
+      const k = idx(i, ny);
+      v[k] = G[k] - scale * (plan.conditions[plan.faces.top[i]].p - p[idx(i, ny)]);
+    }
+  }
 }
 
 // Per-grid scratch buffers and the precomputed fluid-cell topology, reused
@@ -584,9 +660,16 @@ function correctVelocities(grid, F, G, dt, rho) {
 // free of solver internals. Rebuilt when the obstacle mask changes.
 const scratchByGrid = new WeakMap();
 
-function scratchFor(grid) {
+function scratchFor(grid, plan) {
   let s = scratchByGrid.get(grid);
-  if (s && s.F.length === grid.u.length && s.maskVersion === grid.maskVersion) return s;
+  if (
+    s &&
+    s.F.length === grid.u.length &&
+    s.maskVersion === grid.maskVersion &&
+    s.plan === plan
+  ) {
+    return s;
+  }
 
   const size = grid.u.length;
   const { nx, ny, stride, solid } = grid;
@@ -613,15 +696,51 @@ function scratchFor(grid) {
     }
   }
 
+  // Dirichlet pressure faces change the operator rather than sitting beside it.
+  //
+  // Eliminating the reflected ghost p_g = 2*p_b - p_k from the Laplacian turns
+  // that direction's contribution from the dropped Neumann term (nothing) into
+  //
+  //     (p_g - p_k) = 2*p_b - 2*p_k
+  //
+  // so the cell's diagonal gains 2 and a known 2*p_b/h^2 moves to the
+  // right-hand side. Folding the diagonal into `counts` keeps the inner loop
+  // of applyA byte-for-byte what it was: with no pressure boundary, nothing
+  // below executes and nothing downstream can tell the difference.
+  let dirichletRHS = null;
+  if (plan?.hasPressure) {
+    dirichletRHS = new Float64Array(size);
+    const at = (faceConditions, faceIndex, cell) => {
+      const condition = plan.conditions[faceConditions[faceIndex]];
+      if (condition.type !== "pressure" || solid[cell]) return;
+      counts[cell] += 2;
+      dirichletRHS[cell] += 2 * condition.p;
+    };
+    for (let j = 1; j <= ny; j++) {
+      at(plan.faces.left, j, idx(1, j));
+      at(plan.faces.right, j, idx(nx, j));
+    }
+    for (let i = 1; i <= nx; i++) {
+      at(plan.faces.bottom, i, idx(i, 1));
+      at(plan.faces.top, i, idx(i, ny));
+    }
+  }
+
   s = {
     F: new Float64Array(size),
     G: new Float64Array(size),
     rhs: new Float64Array(size),
     maskVersion: grid.maskVersion,
+    plan,
     cells: {
       fluid: Int32Array.from(fluid),
       offsets,
       counts,
+      dirichletRHS,
+      // With a prescribed pressure anywhere the constant null space is gone,
+      // and projecting it out would remove a component the boundary condition
+      // legitimately fixes.
+      singular: !plan?.hasPressure,
       // CG work vectors, allocated once per grid rather than per timestep.
       work: {
         r: new Float64Array(size),
@@ -652,7 +771,8 @@ export function step(grid, bc, params) {
     poissonMaxIterations = 5000,
   } = params;
 
-  const { F, G, rhs, cells } = scratchFor(grid);
+  const plan = boundaryPlanFor(grid, bc);
+  const { F, G, rhs, cells } = scratchFor(grid, plan);
 
   // Reject a timestep this field cannot survive, before doing any work. If the
   // field arrived already non-finite this returns rather than throwing: step()
@@ -671,16 +791,16 @@ export function step(grid, bc, params) {
   computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G);
   applyVelocityBoundaryConditions(grid, bc, F, G);
 
-  computeRHS(grid, F, G, dt, rho, rhs);
+  computeRHS(grid, F, G, dt, rho, rhs, cells);
   const poisson = solvePressurePoisson(grid, rhs, cells, {
     residualTol: (divergenceTol * rho) / dt,
     maxIterations: poissonMaxIterations,
   });
-  correctVelocities(grid, F, G, dt, rho);
+  correctVelocities(grid, F, G, dt, rho, plan);
 
   // Only the pressure ghosts are refreshed here. The velocity boundary values
   // already came through F,G and must not be re-derived - see correctVelocities.
-  applyPressureBoundaryConditions(grid);
+  applyPressureBoundaryConditions(grid, bc);
 
   // Backstop. The pre-step check is necessary but not sufficient: it bounds the
   // timestep against the field as it stands, and a sharp geometric corner can

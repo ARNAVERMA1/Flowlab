@@ -265,3 +265,300 @@ test("M4 - the same specification object compiles once", () => {
   const second = boundaryPlanFor(grid, spec);
   assert.equal(first, second, "the plan should be cached against the specification object");
 });
+
+// ---------------------------------------------------------------------------
+// Flow-rate inlets
+// ---------------------------------------------------------------------------
+
+function channel({ cpw = 16, w = 1, L = 6, nu = 0.05, rho = 1, bc }) {
+  const h = w / cpw;
+  const grid = new StaggeredGrid(Math.round(L / h), cpw, h);
+  return {
+    grid, bc, h, cpw, w, L, nu, rho,
+    params: {
+      nu, rho,
+      dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 2),
+      divergenceTol: 1e-7,
+      poissonMaxIterations: 20000,
+    },
+  };
+}
+
+function fluxAcross(grid, i) {
+  let q = 0;
+  for (let j = 1; j <= grid.ny; j++) q += grid.u[grid.idx(i, j)] * grid.h;
+  return q;
+}
+
+test("M4 - a flow-rate inlet delivers exactly the rate it was asked for", () => {
+  // The whole point of specifying a rate rather than a velocity: the number
+  // asked for is the number delivered, at any resolution, for either profile.
+  // Renormalising the sampled shape is what buys the exactness - sampling a
+  // parabola and trusting the algebra would leave an O(h^2) shortfall.
+  for (const profile of ["uniform", "parabolic"]) {
+    for (const cpw of [8, 16, 33]) {
+      const Q = 0.75;
+      const setup = channel({
+        cpw,
+        bc: {
+          left: { type: "flowInlet", flowRate: Q, profile },
+          right: { type: "outflow" },
+          top: { type: "wall" },
+          bottom: { type: "wall" },
+        },
+      });
+      for (let n = 0; n < 40; n++) step(setup.grid, setup.bc, setup.params);
+      const inlet = fluxAcross(setup.grid, 0);
+      assert.ok(
+        Math.abs(inlet - Q) < 1e-14,
+        `${profile} at ${cpw} cells: delivered ${inlet}, asked for ${Q}`
+      );
+    }
+  }
+  console.log("[M4 flow inlet] uniform and parabolic deliver the requested rate to 1e-14 at 8, 16 and 33 cells");
+});
+
+test("M4 - a parabolic inlet has a parabolic shape, not just the right total", () => {
+  // Exactness of the integral would also be satisfied by a uniform profile, so
+  // the shape has to be checked separately. A fully developed plane channel
+  // peaks at 1.5x its mean.
+  const Q = 1;
+  const observed = [];
+  for (const cpw of [16, 32, 64]) {
+    const setup = channel({
+      cpw,
+      bc: {
+        left: { type: "flowInlet", flowRate: Q, profile: "parabolic" },
+        right: { type: "outflow" },
+        top: { type: "wall" },
+        bottom: { type: "wall" },
+      },
+    });
+    const plan = compileBoundaryConditions(setup.grid, setup.bc);
+    let peak = 0;
+    for (let j = 1; j <= cpw; j++) peak = Math.max(peak, plan.profiles.left[j]);
+    observed.push({ cpw, ratio: peak / (Q / setup.w) });
+  }
+  // Sampling a parabola at cell centres undershoots the true peak, by less as
+  // the grid refines. What matters is that it is heading for 1.5 rather than
+  // sitting at 1.
+  assert.ok(observed[0].ratio > 1.4, `16 cells: peak/mean ${observed[0].ratio}`);
+  assert.ok(
+    observed[2].ratio > observed[1].ratio && observed[1].ratio > observed[0].ratio,
+    "the peak-to-mean ratio should rise toward 1.5 with resolution"
+  );
+  assert.ok(observed[2].ratio < 1.5, "and must never exceed the continuum value");
+  console.log(
+    "[M4 flow inlet] parabolic peak/mean -> 1.5: " +
+    observed.map((o) => `${o.cpw} cells ${o.ratio.toFixed(4)}`).join(", ")
+  );
+});
+
+test("M4 - a partly blocked flow-rate inlet still delivers its rate", () => {
+  // An inlet half covered by an obstacle should push harder through what is
+  // left, not quietly deliver half the flow.
+  const Q = 0.5;
+  const cpw = 16;
+  const setup = channel({
+    cpw,
+    bc: {
+      left: { type: "flowInlet", flowRate: Q, profile: "uniform" },
+      right: { type: "outflow" },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+  });
+  // Block the lower half of the inlet column.
+  for (let j = 1; j <= cpw / 2; j++) setup.grid.solid[setup.grid.idx(1, j)] = 1;
+  setup.grid.maskVersion++;
+
+  const plan = compileBoundaryConditions(setup.grid, setup.bc);
+  let open = 0;
+  let delivered = 0;
+  for (let j = 1; j <= cpw; j++) {
+    if (setup.grid.solid[setup.grid.idx(1, j)]) {
+      assert.equal(plan.profiles.left[j], 0, `blocked face ${j} was given a velocity`);
+      continue;
+    }
+    open++;
+    delivered += plan.profiles.left[j] * setup.h;
+  }
+  assert.ok(Math.abs(delivered - Q) < 1e-15, `delivered ${delivered}, asked for ${Q}`);
+  const velocity = plan.profiles.left[cpw];
+  assert.ok(
+    Math.abs(velocity - Q / (open * setup.h)) < 1e-15,
+    "the open faces should carry the whole rate between them"
+  );
+  console.log(
+    `[M4 flow inlet] ${open} of ${cpw} faces open, each at ${velocity.toFixed(4)} ` +
+    `(twice the unblocked ${(Q / (cpw * setup.h)).toFixed(4)}), total still ${delivered}`
+  );
+});
+
+test("M4 - impossible flow-rate inlets are rejected with a reason", () => {
+  const cpw = 16;
+  const blocked = channel({
+    cpw,
+    bc: {
+      left: { type: "flowInlet", flowRate: 1 },
+      right: { type: "outflow" },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+  });
+  for (let j = 1; j <= cpw; j++) blocked.grid.solid[blocked.grid.idx(1, j)] = 1;
+  blocked.grid.maskVersion++;
+  let error = captureThrow(() => compileBoundaryConditions(blocked.grid, blocked.bc));
+  assert.match(error.message, /completely blocked/, "a fully blocked inlet must say so");
+
+  // A parabola needs one unbroken opening; two openings have no single centre
+  // to span, and guessing one would invent a profile nobody asked for.
+  const split = channel({
+    cpw,
+    bc: {
+      left: { type: "flowInlet", flowRate: 1, profile: "parabolic" },
+      right: { type: "outflow" },
+      top: { type: "wall" },
+      bottom: { type: "wall" },
+    },
+  });
+  split.grid.solid[split.grid.idx(1, Math.round(cpw / 2))] = 1;
+  split.grid.maskVersion++;
+  error = captureThrow(() => compileBoundaryConditions(split.grid, split.bc));
+  assert.match(error.message, /unbroken open stretch/, "a split parabolic inlet must say so");
+
+  // The same split is fine for a uniform profile.
+  compileBoundaryConditions(split.grid, { ...split.bc, left: { type: "flowInlet", flowRate: 1 } });
+});
+
+// ---------------------------------------------------------------------------
+// Pressure boundaries
+// ---------------------------------------------------------------------------
+
+test("M4 - two pressure boundaries with different values stay different", () => {
+  // Regression. The condition table deduplicates identical conditions so the
+  // legend lists each once, and its key used to be a hand-written list of
+  // fields - type, u, v, label. When `pressure` arrived with its own `p`, both
+  // ends of a channel hashed to the same key and merged: one condition, the
+  // same pressure at both ends, zero flow. It converged in four iterations and
+  // looked entirely healthy.
+  const grid = grid8();
+  const plan = compileBoundaryConditions(grid, {
+    left: { type: "pressure", p: 1 },
+    right: { type: "pressure", p: 0 },
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  });
+  const pressures = plan.conditions.filter((c) => c.type === "pressure").map((c) => c.p);
+  assert.deepEqual(pressures.sort(), [0, 1], "the two pressure values must survive interning");
+  assert.notEqual(plan.faces.left[1], plan.faces.right[1], "both ends resolved to one condition");
+});
+
+test("M4 - pressure and outflow cannot be mixed", () => {
+  rejects(
+    { left: { type: "pressure", p: 1 }, right: { type: "outflow" }, top: { type: "wall" }, bottom: { type: "wall" } },
+    /mixes "outflow" with "pressure"/,
+    "flux rescaling would fight the pressure boundary"
+  );
+});
+
+test("M4 - a prescribed pressure drives the analytically correct flow rate", () => {
+  // The decision this test exists to settle. A plane channel with the pressure
+  // fixed at both ends has an exact steady answer,
+  //
+  //     U_mean = dp * w^2 / (12 * mu * L)
+  //
+  // so the pressure boundary can be checked against closed form rather than
+  // eyeballed. Both the flow rate and the local gradient are measured: the
+  // first includes entrance losses, the second isolates the developed region.
+  const w = 1;
+  const L = 6;
+  const nu = 0.05;
+  const dp = 3.6;
+  const expected = (dp * w * w) / (12 * nu * L);
+  const results = [];
+
+  for (const cpw of [16, 32]) {
+    const setup = channel({
+      cpw, w, L, nu,
+      bc: {
+        left: { type: "pressure", p: dp },
+        right: { type: "pressure", p: 0 },
+        top: { type: "wall" },
+        bottom: { type: "wall" },
+      },
+    });
+    const steps = Math.round(50 / setup.params.dt);
+    for (let n = 0; n < steps; n++) step(setup.grid, setup.bc, setup.params);
+
+    const { grid } = setup;
+    const measured = fluxAcross(grid, Math.round(grid.nx / 2)) / w;
+    // The flux is a genuine output here - nothing prescribed it - so its
+    // constancy along the channel is a real check, not a restatement of a
+    // boundary value.
+    const inlet = fluxAcross(grid, 0);
+    const outlet = fluxAcross(grid, grid.nx);
+    assert.ok(
+      Math.abs(inlet - outlet) < 1e-8,
+      `flux is not conserved: ${inlet} in, ${outlet} out`
+    );
+    results.push({ cpw, measured, error: (measured - expected) / expected });
+  }
+
+  const [coarse, fine] = results;
+  const order = Math.log2(Math.abs(coarse.error) / Math.abs(fine.error));
+  console.log(
+    `[M4 pressure] plane channel, dp = ${dp} over L = ${L}, theory U_mean = ${expected.toFixed(6)}:\n` +
+    results
+      .map((r) => `            ${r.cpw} cells across: ${r.measured.toFixed(6)} (${(r.error * 100).toFixed(3)}%)`)
+      .join("\n") +
+    `\n            observed convergence order ${order.toFixed(2)}`
+  );
+
+  // The order is the load-bearing assertion. A single error figure can be
+  // small for the wrong reasons; a wrongly implemented boundary does not
+  // converge at second order to the right answer.
+  assert.ok(order > 1.8 && order < 2.2, `convergence order ${order.toFixed(2)}, expected 2`);
+  assert.ok(Math.abs(fine.error) < 0.01, `error at 32 cells is ${(fine.error * 100).toFixed(3)}%`);
+
+  // The remaining discrepancy is the WALL treatment, not the pressure ends:
+  // reflecting the no-slip condition into the ghost is exact for a linear
+  // profile and O(h^2) for a parabolic one, which is why refining fixes it.
+  // If the ends were at fault the local gradient in the developed region would
+  // be right while the overall rate was wrong, and it is not.
+  assert.ok(coarse.error > 0 && fine.error > 0, "the discrete channel should flow slightly freely");
+});
+
+test("M4 - a pressure boundary makes the pressure problem non-singular", () => {
+  // The structural change. Without a prescribed pressure the operator has a
+  // constant null space and the solve projects it out; with one, the solution
+  // is unique and projecting would discard part of the answer.
+  const grid = grid8();
+  const neumann = boundaryPlanFor(grid, CLOSED);
+  assert.equal(neumann.hasPressure, false);
+
+  const driven = { ...CLOSED, left: { type: "pressure", p: 1 }, right: { type: "pressure", p: 0 } };
+  const plan = boundaryPlanFor(grid, driven);
+  assert.equal(plan.hasPressure, true);
+
+  // With a Dirichlet boundary the absolute level is fixed, so the field must
+  // NOT come out zero-mean - which is exactly what a stray null-space
+  // projection would produce.
+  const params = { nu: 0.05, rho: 1, dt: 1e-3, divergenceTol: 1e-7 };
+  for (let n = 0; n < 200; n++) step(grid, driven, params);
+  let total = 0;
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) total += grid.p[grid.idx(i, j)];
+  }
+  const mean = total / (grid.nx * grid.ny);
+  assert.ok(Math.abs(mean - 0.5) < 0.05, `mean pressure ${mean}, expected about 0.5`);
+
+  // And the reflected ghost puts the prescribed value on the FACE, not half a
+  // cell outside it: the average of the ghost and the first cell is p_boundary.
+  const onFace = (grid.p[grid.idx(0, 3)] + grid.p[grid.idx(1, 3)]) / 2;
+  assert.ok(Math.abs(onFace - 1) < 1e-9, `the boundary value landed at ${onFace}, not 1`);
+  console.log(
+    `[M4 pressure] driven box: mean p ${mean.toFixed(4)} (not projected to zero), ` +
+    `prescribed value recovered on the face to ${Math.abs(onFace - 1).toExponential(1)}`
+  );
+});

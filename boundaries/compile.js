@@ -29,7 +29,9 @@
 // Positions are physical, measured along the side from its origin: y from the
 // bottom for the left and right sides, x from the left for the bottom and top.
 
-import { BOUNDARY_TYPES, SIDES, SIDE_ORIENTATION, isKnownType, normalComponent } from "./conditions.js";
+import {
+  BOUNDARY_TYPES, FLOW_PROFILES, SIDES, SIDE_ORIENTATION, isKnownType, normalComponent,
+} from "./conditions.js";
 
 export class BoundarySpecError extends Error {
   constructor(message) {
@@ -93,6 +95,14 @@ function validateCondition(condition, side, where) {
         `${side}${where}: a ${condition.type} cannot have a normal component ` +
         `(${n} = ${condition[n]}). A wall fluid passes through is an inlet - ` +
         `use type "inflow" if that is what you meant.`
+      );
+    }
+  }
+  if (condition.type === "flowInlet" && condition.profile !== undefined) {
+    if (!FLOW_PROFILES.includes(condition.profile)) {
+      throw new BoundarySpecError(
+        `${side}${where}: unknown flow profile "${condition.profile}". ` +
+        `Known profiles: ${FLOW_PROFILES.join(", ")}`
       );
     }
   }
@@ -196,6 +206,102 @@ function spansOf(faces, geometry, grid) {
   return spans;
 }
 
+// Turns each flow-rate inlet into per-face velocities.
+//
+// The requested rate is delivered through the OPEN faces of the segment - the
+// ones whose adjacent interior cell is fluid. An inlet half covered by an
+// obstacle still delivers its stated rate, at twice the velocity, rather than
+// silently delivering half.
+//
+// Both profiles are RENORMALISED after sampling rather than evaluated from a
+// closed form and hoped over: the sum of the sampled shape times h is divided
+// into the requested rate, so the discrete flux equals the request exactly,
+// at any resolution, for any open length. Sampling a parabola at face centres
+// and trusting the algebra would leave an O(h^2) shortfall, and "the inlet
+// delivers almost the requested flow" is not a property worth shipping when
+// the exact one costs one division.
+function buildFlowProfile(grid, side, geometry, faceConditions, conditions) {
+  let needed = false;
+  for (let t = 1; t <= geometry.cells; t++) {
+    if (conditions[faceConditions[t]].type === "flowInlet") { needed = true; break; }
+  }
+  if (!needed) return null;
+
+  const profile = new Float64Array(geometry.faceCount);
+  const openAt = (t) => {
+    const cell =
+      side === "left" ? grid.idx(1, t)
+      : side === "right" ? grid.idx(grid.nx, t)
+      : side === "bottom" ? grid.idx(t, 1)
+      : grid.idx(t, grid.ny);
+    return grid.solid[cell] === 0;
+  };
+
+  // Contiguous runs of faces sharing one condition. Runs rather than condition
+  // index, so two separate segments each deliver their own rate.
+  let start = 1;
+  while (start <= geometry.cells) {
+    const index = faceConditions[start];
+    let end = start;
+    while (end + 1 <= geometry.cells && faceConditions[end + 1] === index) end++;
+    const condition = conditions[index];
+    if (condition.type === "flowInlet") {
+      fillRun(profile, condition, side, start, end, openAt, grid.h);
+    }
+    start = end + 1;
+  }
+
+  // Corner ghosts take their neighbour's value. They are overwritten by the
+  // perpendicular sides anyway; leaving them at zero would put a step in the
+  // field for the one moment before that happens.
+  profile[0] = profile[1];
+  profile[geometry.faceCount - 1] = profile[geometry.faceCount - 2];
+  return profile;
+}
+
+function fillRun(profile, condition, side, start, end, openAt, h) {
+  const open = [];
+  for (let t = start; t <= end; t++) if (openAt(t)) open.push(t);
+
+  if (open.length === 0) {
+    throw new BoundarySpecError(
+      `${side}: a flow-rate inlet is completely blocked by solid cells, so the ` +
+      `requested rate of ${condition.flowRate} cannot be delivered anywhere.`
+    );
+  }
+
+  const profileKind = condition.profile ?? "uniform";
+  const shape = new Map();
+
+  if (profileKind === "uniform") {
+    for (const t of open) shape.set(t, 1);
+  } else {
+    // A parabola needs a single channel to span. Two open stretches separated
+    // by an obstacle have no unambiguous "centre", and guessing one would
+    // invent a profile nobody asked for.
+    const contiguous = open[open.length - 1] - open[0] + 1 === open.length;
+    if (!contiguous) {
+      throw new BoundarySpecError(
+        `${side}: a parabolic flow-rate inlet needs one unbroken open stretch, but ` +
+        `solid cells split this one into separate openings. Use profile "uniform", ` +
+        `or give each opening its own segment.`
+      );
+    }
+    const width = open.length * h;
+    for (const t of open) {
+      // Position of this face centre measured from the start of the opening.
+      const s = (t - open[0] + 0.5) * h;
+      const centred = (s - width / 2) / (width / 2);
+      shape.set(t, Math.max(0, 1 - centred * centred));
+    }
+  }
+
+  let total = 0;
+  for (const value of shape.values()) total += value * h;
+  const scale = condition.flowRate / total;
+  for (const [t, value] of shape) profile[t] = value * scale;
+}
+
 export function compileBoundaryConditions(grid, spec) {
   if (!spec || typeof spec !== "object") {
     throw new BoundarySpecError(`expected a boundary specification object, got ${spec}`);
@@ -212,15 +318,27 @@ export function compileBoundaryConditions(grid, spec) {
 
   const conditions = [];
   const interned = new Map();
-  const intern = (condition) => {
+  const intern = (condition, uniqueKey = null) => {
     // Deduplicated so that the same condition applied to several sides appears
     // once in the legend rather than four times.
-    const key = JSON.stringify([
-      condition.type,
-      condition.u ?? null,
-      condition.v ?? null,
-      condition.label ?? null,
-    ]);
+    //
+    // Flow-rate inlets are the exception and are NEVER merged: each one
+    // delivers its stated rate, so two segments asking for Q carry 2Q between
+    // them. Merging them into one entry would make the pair deliver Q in
+    // total, which is a wrong answer that looks like tidy deduplication.
+    // Keyed on the WHOLE condition, every property, sorted. An earlier version
+    // listed the fields by hand - type, u, v, label - and when the `pressure`
+    // type was added with its own `p` parameter, `{ pressure: 1 }` and
+    // `{ pressure: 0 }` hashed to the same key and were merged into one
+    // condition. The result was a channel with the same pressure at both ends:
+    // it solved cleanly, converged in four iterations, and sat there at
+    // exactly zero flow. Nothing about it looked broken.
+    //
+    // A key that has to be updated whenever a parameter is added is a key that
+    // will eventually be forgotten, so this one cannot be.
+    const key = uniqueKey ?? JSON.stringify(
+      Object.keys(condition).sort().map((field) => [field, condition[field]])
+    );
     if (interned.has(key)) return interned.get(key);
     const index = conditions.length;
     conditions.push(Object.freeze({ ...condition }));
@@ -230,14 +348,21 @@ export function compileBoundaryConditions(grid, spec) {
 
   const faces = {};
   const sides = {};
+  const profiles = {};
+  let flowInlets = 0;
   for (const side of SIDES) {
     const geometry = sideGeometry(grid, side);
     const segments = normaliseSide(spec[side], side, grid);
     const array = new Int32Array(geometry.faceCount);
     for (let t = 0; t < geometry.faceCount; t++) {
-      array[t] = intern(segmentAt(segments, geometry.positionAt(t)).condition);
+      const segment = segmentAt(segments, geometry.positionAt(t));
+      if (segment.condition.type === "flowInlet") {
+        segment.uniqueKey ??= `flowInlet:${side}:${flowInlets++}`;
+      }
+      array[t] = intern(segment.condition, segment.uniqueKey);
     }
     faces[side] = array;
+    profiles[side] = buildFlowProfile(grid, side, geometry, array, conditions);
     sides[side] = {
       orientation: geometry.orientation,
       length: geometry.length,
@@ -252,22 +377,55 @@ export function compileBoundaryConditions(grid, spec) {
   // in the rescale - which with segments is no longer a property of a whole
   // side.
   const outflowMask = Uint8Array.from(conditions, (c) => (c.type === "outflow" ? 1 : 0));
+  const pressureMask = Uint8Array.from(conditions, (c) => (c.type === "pressure" ? 1 : 0));
+
+  // A pressure boundary determines its own flux; `outflow` exists to force the
+  // total flux to balance because the pure-Neumann problem is otherwise
+  // unsolvable. Together they fight: the rescale would overwrite velocities the
+  // pressure solve is entitled to set, every step. There is no sensible
+  // reading of a specification that asks for both.
+  const usesOutflow = conditions.some((c) => c.type === "outflow");
+  const usesPressure = conditions.some((c) => c.type === "pressure");
+  if (usesOutflow && usesPressure) {
+    throw new BoundarySpecError(
+      `this specification mixes "outflow" with "pressure". An outflow boundary has its ` +
+      `velocity rescaled so the domain's total inflow and outflow balance, which is what ` +
+      `makes a pure-Neumann pressure problem solvable; a pressure boundary determines its ` +
+      `own flux instead and needs no such balance. Use one or the other: pressure at both ` +
+      `ends for a pressure-driven flow, or a velocity inlet with an outflow outlet.`
+    );
+  }
 
   return {
     conditions,
     outflowMask,
+    pressureMask,
+    hasPressure: usesPressure,
     faces,
+    // Per-face normal velocity for flow-rate inlets, zero elsewhere. Held
+    // separately from `conditions` because it depends on the solid mask - an
+    // inlet partly blocked by an obstacle has a different open length, and
+    // therefore a different velocity, for the same requested rate.
+    profiles,
+    hasFlowInlet: flowInlets > 0,
     sides,
-    // Compilation depends on the grid's dimensions but not on its solid mask;
-    // recorded anyway so a caller caching a plan can tell what it was built for.
     nx: grid.nx,
     ny: grid.ny,
     h: grid.h,
+    // Flow-rate inlets read the solid mask to find their open length, so a
+    // plan built against one mask does not apply to another. Recorded even
+    // when no flow inlet is present, so the caching rule has no special case.
+    maskVersion: grid.maskVersion,
   };
 }
 
 // True when a plan was built for this grid's dimensions. The solver caches
 // compiled plans and needs to know when a cached one no longer applies.
 export function planMatchesGrid(plan, grid) {
-  return plan.nx === grid.nx && plan.ny === grid.ny && plan.h === grid.h;
+  return (
+    plan.nx === grid.nx &&
+    plan.ny === grid.ny &&
+    plan.h === grid.h &&
+    plan.maskVersion === grid.maskVersion
+  );
 }
