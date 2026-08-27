@@ -31,7 +31,17 @@ test("M4 - boundary fields are byte-identical to the recorded golden run", () =>
   const missing = [];
   const changed = [];
 
+  const excluded = [];
   for (const entry of FIXTURE_CASES) {
+    // Cases demonstrated to specify an ill-posed problem are excluded from the
+    // comparison, not deleted: their recorded hashes are hashes of a broken
+    // field, and overwriting them would erase the evidence of what was being
+    // asserted. See tests/support/boundaryFixtures.js for the measurements and
+    // tests/test11 for what these configurations do now.
+    if (entry.invalid) {
+      excluded.push(`${entry.id} (${entry.invalid})`);
+      continue;
+    }
     const expected = GOLDEN.cases[entry.id];
     if (!expected) {
       missing.push(entry.id);
@@ -59,13 +69,16 @@ test("M4 - boundary fields are byte-identical to the recorded golden run", () =>
     "Regenerate the fixture only if the change to the physics is intended and said so."
   );
 
-  const real = FIXTURE_CASES.filter((c) => c.group === "real").length;
-  const coverage = FIXTURE_CASES.length - real;
+  const compared = FIXTURE_CASES.filter((c) => !c.invalid);
+  const real = compared.filter((c) => c.group === "real").length;
   console.log(
-    `[M4 golden] ${FIXTURE_CASES.length} cases byte-identical ` +
-    `(${real} validated configurations, ${coverage} type-by-position coverage), ` +
+    `[M4 golden] ${compared.length} cases byte-identical ` +
+    `(${real} validated configurations, ${compared.length - real} type-by-position coverage), ` +
     `recorded ${GOLDEN.generatedAt}`
   );
+  if (excluded.length) {
+    console.log(`[M4 golden] excluded as ill-posed: ${excluded.join("; ")}`);
+  }
 });
 
 test("M4 - the golden record covers every boundary type in every position", () => {

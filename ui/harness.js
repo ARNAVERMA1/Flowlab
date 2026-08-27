@@ -33,6 +33,7 @@ import { samplerCss } from "../visualization/colormap.js";
 import {
   drawBoundaryOverlay, boundaryLegend, measureBoundaryFlux,
 } from "../visualization/boundaryOverlay.js";
+import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
 import {
   prepareView,
   FIELD_SOURCES,
@@ -399,6 +400,12 @@ export class Harness {
     // Shown because a boundary specification that does not balance is a real
     // error, and this is where it becomes visible.
     set("#bcnet", exponential(flux.net, 2), isBad(flux.net) || Math.abs(flux.net) > 1e-6);
+
+    // Connected fluid regions. A second region is not an error - a sealed
+    // chamber runs perfectly well - so this reports rather than warns. The
+    // solver rejects only the region it genuinely cannot solve, and says so
+    // itself when it does.
+    set("#bcregions", describeRegions(analyseRegions(this.scenario.grid, this.plan)));
   }
 
   updateLegend(view) {

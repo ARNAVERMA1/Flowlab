@@ -221,8 +221,19 @@ export const FIXTURE_CASES = [
     build: () => shearedBox({ left: FS, right: FS, top: FS, bottom: FS }),
   },
   {
+    // DEMONSTRATED ILL-POSED. Every side copies its interior velocity and none
+    // of them participates in the flux balance, so the domain carries a net
+    // flux that nothing can remove. Measured against the pre-M5 solver: it
+    // reported a divergence of 9.889e-8 as converged while the field's actual
+    // max|div u| was 1.206e-2, equal to the unbalanced net flux.
+    //
+    // The recorded hashes below are therefore hashes of a broken field. They
+    // are left in place rather than deleted, as the record of what was being
+    // asserted; `invalid` takes the case out of the byte-identity comparison,
+    // and tests/test11 asserts what it does now instead.
     id: "zero-gradient-box",
     group: "coverage",
+    invalid: "unbalanceable: no boundary condition here can absorb the net flux",
     description: "zero-gradient on all four sides",
     build: () => shearedBox({ left: ZG, right: ZG, top: ZG, bottom: ZG }),
   },
@@ -243,9 +254,21 @@ export const FIXTURE_CASES = [
       }),
   },
   {
-    // Outflow on two sides at once exercises the multi-face branch of
-    // enforceGlobalFluxBalance, where the rescale is shared out.
+    // DEMONSTRATED BROKEN WHEN RECORDED. Outflow on two sides at once was
+    // meant to exercise the multi-face branch of the flux balance. It exposed
+    // the opposite: the rescale added a FLAT delta to every outflow face, and
+    // because influx through a face is sign*value*h, opposed outlets cancelled
+    // and the rescale did nothing at all. Measured against the pre-M5 solver:
+    // divergence reported as 8.115e-8 while the field's actual max|div u| was
+    // 2.950e-1.
+    //
+    // Fixed in M5 by applying the correction along each face's outward normal.
+    // The recorded hashes below predate that fix and are hashes of a broken
+    // field, so they are excluded from the comparison rather than regenerated
+    // - regenerating would quietly overwrite the evidence. tests/test11
+    // asserts the corrected behaviour.
     id: "two-outflows",
+    invalid: "recorded before the outward-normal rescale fix; hashes are of an unbalanced field",
     group: "coverage",
     description: "inflow left, outflow on both the right and the bottom",
     build: () =>

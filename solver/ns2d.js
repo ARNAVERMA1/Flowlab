@@ -41,11 +41,24 @@
 // cell lies exactly on the body surface. See applySolidBoundaryConditions.
 
 import { compileBoundaryConditions, planMatchesGrid } from "../boundaries/compile.js";
+import { fluidRegions } from "../geometry/regions.js";
 import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
 
 // Raised when the projection cannot deliver the incompressibility it was asked
 // for. Distinct from SolverStabilityError: that one is about the scheme coming
 // apart, this one is about the continuity constraint not being met.
+// A geometry the solver cannot satisfy, as opposed to one it merely finds
+// hard. Separate from SolverDivergenceError because the remedy is different:
+// a divergence failure asks for more iterations or a looser bound, while this
+// one asks the user to change what they drew.
+export class SolverGeometryError extends Error {
+  constructor(message, detail) {
+    super(message);
+    this.name = "SolverGeometryError";
+    Object.assign(this, detail);
+  }
+}
+
 export class SolverDivergenceError extends Error {
   constructor(message, detail) {
     super(message);
@@ -226,7 +239,7 @@ export function applyVelocityBoundaryConditions(grid, bc, u, v) {
   applySideBoundary(grid, plan, "top", u, v);
 
   applySolidBoundaryConditions(grid, u, v);
-  enforceGlobalFluxBalance(grid, plan, u, v);
+  return enforceFluxBalance(grid, plan, u, v);
 }
 
 // No-slip on the surface of an obstacle.
@@ -288,13 +301,35 @@ export function applySolidBoundaryConditions(grid, u, v) {
   }
 }
 
-// Rescales faces on "outflow" sides so total outflow matches total inflow.
+// Rescales faces on "outflow" sides so outflow matches inflow, PER CONNECTED
+// FLUID REGION.
+//
 // Without this the pure-Neumann pressure problem is not solvable: a uniform
 // inlet paired with a zero-gradient outlet does not conserve mass on its own,
-// and the projection has no way to fix a global imbalance.
-function enforceGlobalFluxBalance(grid, plan, u, v) {
+// and the projection has no way to fix an imbalance.
+//
+// Per region rather than globally, which is the one thing the solver turned
+// out to depend on when a drawn wall can split the domain. The two are
+// identical while there is one region, which is why this was invisible until
+// M5. With two, a single uniform correction cannot satisfy both: a channel
+// split into an upper half fed at u = 2 and a lower half fed at u = 1, with an
+// outlet on each, balances globally and is impossible in each half. Measured
+// before this change, that geometry threw at step one with the pressure at
+// 9.7e16; after it, it runs at a divergence of 8.6e-8.
+//
+// What this does NOT do is fix a region with inflow and no outlet at all -
+// there is nothing to rescale. That case is detected here and reported to
+// step(), which rejects it by name rather than letting it surface as an
+// unexplained divergence failure.
+//
+// The accumulation order is unchanged from the global version. `net` was a
+// running float sum and still is, one per region, visiting faces in the same
+// order; faces adjacent to solid carry exactly zero velocity and so
+// contribute nothing whether they are summed or skipped.
+function enforceFluxBalance(grid, plan, u, v) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
+  const { label, count: regionCount, cellCounts } = fluidRegions(grid);
   // With segments, "is this an outflow" is a property of a face rather than of
   // a whole side, so the test is per face. The traversal and accumulation
   // order below is unchanged from the per-side version: `net` is a running
@@ -304,36 +339,86 @@ function enforceGlobalFluxBalance(grid, plan, u, v) {
   const isOutflow = { left: plan.faces.left, right: plan.faces.right,
                       bottom: plan.faces.bottom, top: plan.faces.top };
 
-  // Net flux counted positive *into* the domain.
-  let net = 0;
+  // Net flux counted positive *into* the domain, per region.
+  const nets = new Float64Array(regionCount);
+  const outflowCounts = new Int32Array(regionCount);
   const faces = [];
 
   for (let j = 1; j <= ny; j++) {
     const kL = idx(0, j);
     const kR = idx(nx, j);
-    net += u[kL] * h;
-    net -= u[kR] * h;
-    if (outflowMask[isOutflow.left[j]] && !solid[idx(1, j)]) faces.push({ arr: u, k: kL, sign: 1 });
-    if (outflowMask[isOutflow.right[j]] && !solid[idx(nx, j)]) faces.push({ arr: u, k: kR, sign: -1 });
+    const rL = label[idx(1, j)];
+    const rR = label[idx(nx, j)];
+    if (rL >= 0) nets[rL] += u[kL] * h;
+    if (rR >= 0) nets[rR] -= u[kR] * h;
+    if (outflowMask[isOutflow.left[j]] && !solid[idx(1, j)]) {
+      const region = label[idx(1, j)];
+      outflowCounts[region] += 1;
+      faces.push({ arr: u, k: kL, sign: 1, region });
+    }
+    if (outflowMask[isOutflow.right[j]] && !solid[idx(nx, j)]) {
+      const region = label[idx(nx, j)];
+      outflowCounts[region] += 1;
+      faces.push({ arr: u, k: kR, sign: -1, region });
+    }
   }
   for (let i = 1; i <= nx; i++) {
     const kB = idx(i, 0);
     const kT = idx(i, ny);
-    net += v[kB] * h;
-    net -= v[kT] * h;
-    if (outflowMask[isOutflow.bottom[i]] && !solid[idx(i, 1)]) faces.push({ arr: v, k: kB, sign: 1 });
-    if (outflowMask[isOutflow.top[i]] && !solid[idx(i, ny)]) faces.push({ arr: v, k: kT, sign: -1 });
+    const rB = label[idx(i, 1)];
+    const rT = label[idx(i, ny)];
+    if (rB >= 0) nets[rB] += v[kB] * h;
+    if (rT >= 0) nets[rT] -= v[kT] * h;
+    if (outflowMask[isOutflow.bottom[i]] && !solid[idx(i, 1)]) {
+      const region = label[idx(i, 1)];
+      outflowCounts[region] += 1;
+      faces.push({ arr: v, k: kB, sign: 1, region });
+    }
+    if (outflowMask[isOutflow.top[i]] && !solid[idx(i, ny)]) {
+      const region = label[idx(i, ny)];
+      outflowCounts[region] += 1;
+      faces.push({ arr: v, k: kT, sign: -1, region });
+    }
   }
 
-  if (faces.length === 0) return;
-  let signSum = 0;
-  for (const f of faces) signSum += f.sign;
-  if (signSum === 0) return;
+  // The correction is applied ALONG each face's outward normal: a face carries
+  // sign*delta, not delta.
+  //
+  // This matters wherever a region has outlets on sides facing different ways.
+  // The influx through a face is sign*value*h, so adding a flat delta to every
+  // face changes the net by delta*h*sum(sign) - which is zero when the signs
+  // cancel, and the rescale then does nothing at all. Adding sign*delta
+  // instead changes it by delta*h*sum(sign^2) = delta*h*count, which can never
+  // be degenerate, and it is what "push harder out of every outlet" actually
+  // means: increase u at a right-hand outlet, decrease v at a bottom one.
+  //
+  // Where every outlet of a region faces the same way the two forms are
+  // identical - sign factors out - which is every validated scenario, and the
+  // golden fields confirm it.
+  const deltas = new Float64Array(regionCount);
+  for (let r = 0; r < regionCount; r++) {
+    if (outflowCounts[r] === 0) continue;
+    deltas[r] = -nets[r] / (outflowCounts[r] * h);
+  }
+  for (const f of faces) f.arr[f.k] += f.sign * deltas[f.region];
 
-  // Adding delta to every open outflow face changes the net influx by
-  // signSum*delta*h; choose delta so the net becomes zero.
-  const delta = -net / (signSum * h);
-  for (const f of faces) f.arr[f.k] += delta;
+  // A region carrying net flux with no outflow face to rescale cannot be made
+  // divergence-free by any pressure field. Reported rather than thrown here,
+  // so the decision about what is tolerable stays with step(), which knows the
+  // divergence bound that was promised.
+  let unbalanced = null;
+  for (let r = 0; r < regionCount; r++) {
+    if (outflowCounts[r] !== 0 || nets[r] === 0) continue;
+    (unbalanced ??= []).push({
+      region: r,
+      netFlux: nets[r],
+      cellCount: cellCounts[r],
+      // The divergence this imbalance forces, spread over the region. Compared
+      // against the caller's tolerance rather than an invented constant.
+      forcedDivergence: Math.abs(nets[r]) / (cellCounts[r] * h * h),
+    });
+  }
+  return unbalanced;
 }
 
 // Pressure: zero-gradient (Neumann) at every boundary, domain and obstacle
@@ -789,7 +874,35 @@ export function step(grid, bc, params) {
   F.set(grid.u);
   G.set(grid.v);
   computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G);
-  applyVelocityBoundaryConditions(grid, bc, F, G);
+  const unbalanced = applyVelocityBoundaryConditions(grid, bc, F, G);
+
+  // A region that must carry flux and has nowhere to send it is not a hard
+  // problem, it is an impossible one: no pressure field makes it
+  // divergence-free. Rejecting it by name here is the difference between "you
+  // sealed the inlet away from the outlet" and the unexplained divergence
+  // failure this used to surface as.
+  //
+  // The threshold is the caller's own divergence bound rather than an invented
+  // constant: an imbalance too small to breach the promise step() already
+  // makes is not worth refusing a geometry over.
+  if (unbalanced) {
+    const fatal = unbalanced.filter((r) => r.forcedDivergence > divergenceTol);
+    if (fatal.length > 0) {
+      const worst = fatal.reduce((a, b) => (a.forcedDivergence > b.forcedDivergence ? a : b));
+      throw new SolverGeometryError(
+        `fluid region ${worst.region} (${worst.cellCount} cells) carries a net flux of ` +
+        `${worst.netFlux.toExponential(3)} and has no outlet to carry it away. ` +
+        `${fatal.length > 1 ? `${fatal.length} regions are in this state. ` : ""}` +
+        `Nothing can make that region divergence-free: it would force a divergence of ` +
+        `${worst.forcedDivergence.toExponential(2)} against a bound of ` +
+        `${divergenceTol.toExponential(2)}. This is a geometry and boundary-condition ` +
+        `problem rather than a solver one - most often a wall drawn across the domain that ` +
+        `separates an inlet from every outlet. Give the region an outlet or a pressure ` +
+        `boundary, or remove the inflow feeding it.`,
+        { reason: "unbalanced-region", regions: fatal }
+      );
+    }
+  }
 
   computeRHS(grid, F, G, dt, rho, rhs, cells);
   const poisson = solvePressurePoisson(grid, rhs, cells, {

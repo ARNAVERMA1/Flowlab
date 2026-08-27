@@ -26,6 +26,9 @@ import {
   GeometryDocumentError,
 } from "../geometry/document.js";
 import { bendDocument, cylinderDocument, emptyDocument } from "../geometry/documents.js";
+import { fluidRegions } from "../geometry/regions.js";
+import { step, computeDivergence, boundaryPlanFor } from "../solver/ns2d.js";
+import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
@@ -564,5 +567,312 @@ test("M5 - no cell centre lands on a bend radius, so gate 1 cannot check that co
   console.log(
     "[M5 gate 1] no cell centre lands on a bend radius across cpw 4..32, so `<` and `<=` " +
     "there are indistinguishable by sampling - the complement test above is what pins it"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Step 3 - connected regions, and what the solver actually depends on
+// ---------------------------------------------------------------------------
+//
+// These tests encode a demonstration, including the part where the prediction
+// was wrong. The guess was that a second fluid region would break the pressure
+// solve, because the zero-mean projection removes only one constant while a
+// two-region operator has two null directions. Measuring it showed otherwise:
+// sealed regions run normally, symmetric or not, and the undetermined constant
+// never reaches the velocity because only the pressure GRADIENT is used.
+//
+// The real dependency is narrower and was invisible until geometry could split
+// the domain: flux must balance PER REGION, and the balance was global.
+
+function splitChannel({ cpw = 24, length = 3 }) {
+  const h = 1 / cpw;
+  const grid = new StaggeredGrid(Math.round(length / h), cpw, h);
+  applyDocument(grid, {
+    operations: [{ op: "add", region: { kind: "rect", x0: 0, y0: 0.5 - h, x1: length, y1: 0.5 + h } }],
+  });
+  return {
+    grid, h,
+    params: {
+      nu: 0.02, rho: 1,
+      dt: 0.4 * Math.min((0.25 * h * h) / 0.02, h / 4),
+      divergenceTol: 1e-7, poissonMaxIterations: 5000,
+    },
+  };
+}
+
+test("M5 - a second fluid region does not break the pressure solve", () => {
+  // The prediction that was wrong, kept as a test so it stays wrong. Three
+  // geometries with two regions each, none of which the solver should object
+  // to. The asymmetric one matters: an earlier version of this check used a
+  // centred wall, where mirror symmetry would have hidden a per-region
+  // pressure drift.
+  const h = 1 / 24;
+  const cases = [
+    { name: "centred wall", at: 0.5 },
+    { name: "off-centre wall", at: 0.3 },
+  ];
+  const report = [];
+  for (const { name, at } of cases) {
+    const grid = new StaggeredGrid(24, 24, h);
+    applyDocument(grid, {
+      operations: [{ op: "add", region: { kind: "rect", x0: at - h, y0: 0, x1: at + h, y1: 1 } }],
+    });
+    const regions = fluidRegions(grid);
+    assert.equal(regions.count, 2, `${name}: expected two regions`);
+
+    const bc = {
+      left: { type: "wall" }, right: { type: "wall" },
+      bottom: { type: "wall" }, top: { type: "wall", u: 1 },
+    };
+    const params = { nu: 0.02, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / 0.02, h), divergenceTol: 1e-7 };
+    for (let n = 0; n < 300; n++) step(grid, bc, params);
+
+    // Per-region mean pressure must not have wandered off along the null
+    // direction the global projection does not remove.
+    const means = [0, 0].map((_, r) => {
+      let sum = 0, count = 0;
+      for (let k = 0; k < regions.label.length; k++) {
+        if (regions.label[k] !== r) continue;
+        sum += grid.p[k];
+        count++;
+      }
+      return sum / count;
+    });
+    const divergence = computeDivergence(grid);
+    assert.ok(divergence.max < params.divergenceTol, `${name}: max|div| ${divergence.max}`);
+    for (const mean of means) {
+      assert.ok(Math.abs(mean) < 1e-9, `${name}: per-region mean pressure drifted to ${mean}`);
+    }
+    report.push(`${name} div ${divergence.max.toExponential(1)} means ${means.map((m) => m.toExponential(1)).join(", ")}`);
+  }
+  console.log(`[M5 regions] two sealed chambers run normally over 300 steps: ${report.join("; ")}`);
+});
+
+test("M5 - a sealed pocket inside an obstacle is legal and inert", () => {
+  const { grid, params } = splitChannel({ cpw: 24, length: 3 });
+  grid.solid.fill(0);
+  applyDocument(grid, {
+    operations: [
+      { op: "add", region: { kind: "rect", x0: 1.0, y0: 0.2, x1: 1.8, y1: 0.8 } },
+      { op: "subtract", region: { kind: "rect", x0: 1.2, y0: 0.35, x1: 1.6, y1: 0.65 } },
+    ],
+  });
+  const regions = fluidRegions(grid);
+  assert.equal(regions.count, 2, "the void inside the block is its own region");
+
+  const bc = {
+    left: { type: "inflow", u: 1, v: 0 }, right: { type: "outflow" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+  };
+  for (let n = 0; n < 120; n++) step(grid, bc, params);
+
+  // The pocket should be exactly still: no face of it carries flow.
+  const pocket = regions.cellCounts[0] < regions.cellCounts[1] ? 0 : 1;
+  let peak = 0;
+  for (let k = 0; k < regions.label.length; k++) {
+    if (regions.label[k] !== pocket) continue;
+    peak = Math.max(peak, Math.abs(grid.u[k]), Math.abs(grid.v[k]));
+  }
+  assert.equal(peak, 0, `the sealed pocket carries velocity ${peak}`);
+  assert.ok(computeDivergence(grid).max < 1e-7);
+
+  const analysis = analyseRegions(grid, boundaryPlanFor(grid, bc));
+  assert.equal(analysis.filter((r) => r.sealed).length, 1, "one region should be reported sealed");
+  assert.match(describeRegions(analysis), /sealed/);
+  console.log(`[M5 regions] ${describeRegions(analysis)}`);
+});
+
+test("M5 - flux balances per region, not merely globally", () => {
+  // The failure the global balance could not see. Both halves have an inlet
+  // AND an outlet, so nothing about the drawing looks wrong; they are fed at
+  // different rates, so one uniform outflow correction cannot satisfy both.
+  // Before per-region balancing this threw at step 1 with the pressure at
+  // 9.7e16.
+  const { grid, params } = splitChannel({});
+  const bc = {
+    left: [
+      { from: 0, to: 0.5, type: "inflow", u: 2, v: 0 },
+      { from: 0.5, to: 1, type: "inflow", u: 1, v: 0 },
+    ],
+    right: { type: "outflow" },
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  };
+  assert.equal(fluidRegions(grid).count, 2);
+  for (let n = 0; n < 120; n++) step(grid, bc, params);
+
+  const divergence = computeDivergence(grid);
+  assert.ok(divergence.max < params.divergenceTol, `max|div| ${divergence.max.toExponential(3)}`);
+
+  // Each half must carry its own inlet's flux out of its own outlet.
+  const mid = Math.round(grid.nx / 2);
+  const half = (from, to) => {
+    let q = 0;
+    for (let j = from; j <= to; j++) q += grid.u[grid.idx(mid, j)] * grid.h;
+    return q;
+  };
+  const lower = half(1, Math.floor(grid.ny / 2) - 1);
+  const upper = half(Math.floor(grid.ny / 2) + 2, grid.ny);
+  assert.ok(lower > 1.5 * upper, `the faster half should carry more: ${lower} vs ${upper}`);
+  console.log(
+    `[M5 regions] per-region balance: lower half carries ${lower.toFixed(4)}, ` +
+    `upper ${upper.toFixed(4)}, max|div| ${divergence.max.toExponential(2)}`
+  );
+});
+
+test("M5 - a region with an inlet and no outlet is rejected by name", () => {
+  // The case per-region balancing cannot fix: there is no outflow face to
+  // rescale. The old behaviour was a SolverDivergenceError complaining about
+  // the pressure solve, which is true and useless. The new one names the
+  // region and the likely cause.
+  const { grid, params } = splitChannel({});
+  const bc = {
+    left: [
+      { from: 0, to: 0.5, type: "wall" },
+      { from: 0.5, to: 1, type: "inflow", u: 1, v: 0 },
+    ],
+    right: [
+      { from: 0, to: 0.5, type: "outflow" },
+      { from: 0.5, to: 1, type: "wall" },
+    ],
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  };
+  const error = captureThrow(() => {
+    for (let n = 0; n < 5; n++) step(grid, bc, params);
+  });
+  assert.ok(error, "expected a rejection");
+  assert.equal(error.name, "SolverGeometryError", `threw ${error.name} instead`);
+  assert.equal(error.reason, "unbalanced-region");
+  assert.match(error.message, /no outlet to carry it away/);
+  assert.match(error.message, /geometry and boundary-condition problem/);
+  assert.equal(error.regions.length, 1, "exactly one region should be unsatisfiable");
+  assert.ok(error.regions[0].forcedDivergence > params.divergenceTol);
+  console.log(
+    `[M5 regions] sealed-off inlet rejected: region ${error.regions[0].region}, ` +
+    `net flux ${error.regions[0].netFlux.toExponential(3)}, ` +
+    `forced divergence ${error.regions[0].forcedDivergence.toExponential(2)}`
+  );
+});
+
+test("M5 - a sealed region carrying no flux is never rejected", () => {
+  // The inverse guard. Sealed regions have zero net flux and no outflow faces,
+  // which is exactly the shape of the rejection condition - so the rejection
+  // has to test the flux, not the absence of an outlet.
+  const h = 1 / 16;
+  const grid = new StaggeredGrid(16, 16, h);
+  applyDocument(grid, {
+    operations: [{ op: "add", region: { kind: "rect", x0: 0.5 - h, y0: 0, x1: 0.5 + h, y1: 1 } }],
+  });
+  const bc = {
+    left: { type: "wall" }, right: { type: "wall" },
+    bottom: { type: "wall" }, top: { type: "wall", u: 1 },
+  };
+  const params = { nu: 0.02, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / 0.02, h), divergenceTol: 1e-7 };
+  assert.equal(fluidRegions(grid).count, 2);
+  for (let n = 0; n < 50; n++) step(grid, bc, params);
+  assert.ok(computeDivergence(grid).max < params.divergenceTol);
+});
+
+test("M5 - connectivity is by shared face, not by corner contact", () => {
+  const grid = new StaggeredGrid(4, 4, 0.25);
+  applyDocument(grid, {
+    operations: [
+      { op: "add", region: { kind: "rect", x0: 0, y0: 0, x1: 0.5, y1: 0.5 } },
+      { op: "add", region: { kind: "rect", x0: 0.5, y0: 0.5, x1: 1, y1: 1 } },
+    ],
+  });
+  // The two fluid quadrants meet only at a corner. No face is shared, so no
+  // flux can cross, so they are separate regions - and the pressure stencil
+  // agrees, since it couples only face neighbours.
+  const regions = fluidRegions(grid);
+  assert.equal(regions.count, 2);
+  assert.deepEqual(Array.from(regions.cellCounts), [4, 4]);
+});
+
+test("M5 - region labels are cached against the mask version", () => {
+  const grid = new StaggeredGrid(12, 12, 1 / 12);
+  const first = fluidRegions(grid);
+  assert.equal(fluidRegions(grid), first, "an unchanged mask should reuse the labelling");
+  applyDocument(grid, { operations: [{ op: "add", region: { kind: "rect", x0: 0, y0: 0, x1: 1, y1: 0.5 } }] });
+  const second = fluidRegions(grid);
+  assert.notEqual(second, first, "a changed mask must relabel");
+  assert.equal(second.count, 1);
+});
+
+test("M5 - opposed outlets are rescaled along their own outward normals", () => {
+  // The bug the region work uncovered, which is not about regions at all.
+  //
+  // The flux rescale added a FLAT delta to every outflow face. Influx through
+  // a face is sign*value*h, so a flat delta changes the net by delta*h*sum(sign)
+  // - zero when outlets face opposite ways. The rescale then did nothing, the
+  // domain stayed unbalanced, and the reported divergence looked healthy
+  // because the inconsistency lives in the null-space component of the
+  // residual, which the zero-mean projection strips out every iteration.
+  //
+  // Measured on the pre-M5 solver with this exact configuration: divergence
+  // reported as 8.115e-8 against an actual max|div u| of 2.950e-1.
+  const n = 16;
+  const h = 1 / n;
+  const grid = new StaggeredGrid(n, n, h);
+  for (let j = 0; j <= n + 1; j++) {
+    for (let i = 0; i <= n + 1; i++) {
+      const { x, y } = grid.cellCentre(i, j);
+      grid.u[grid.idx(i, j)] = Math.sin(3 * y) + 0.25 * Math.cos(2 * x);
+      grid.v[grid.idx(i, j)] = 0.4 * Math.sin(2 * x) - 0.1 * Math.cos(3 * y);
+    }
+  }
+  const bc = {
+    left: { type: "inflow", u: 1, v: 0 },
+    right: { type: "outflow" },
+    top: { type: "wall" },
+    bottom: { type: "outflow" },
+  };
+  const nu = 0.01;
+  const params = { nu, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 2), divergenceTol: 1e-7 };
+  for (let k = 0; k < 30; k++) step(grid, bc, params);
+
+  // The measured divergence, not the reported one. These were five to seven
+  // orders of magnitude apart before the fix, which is the whole point.
+  const measured = computeDivergence(grid).max;
+  assert.ok(measured < params.divergenceTol, `max|div u| is ${measured.toExponential(3)}`);
+
+  let net = 0;
+  for (let j = 1; j <= n; j++) net += grid.u[grid.idx(0, j)] * h - grid.u[grid.idx(n, j)] * h;
+  for (let i = 1; i <= n; i++) net += grid.v[grid.idx(i, 0)] * h - grid.v[grid.idx(i, n)] * h;
+  assert.ok(Math.abs(net) < 1e-12, `net flux into the domain is ${net.toExponential(3)}`);
+  console.log(
+    `[M5 regions] opposed outlets: max|div u| ${measured.toExponential(2)}, ` +
+    `net flux ${net.toExponential(2)} (was 2.950e-1 reported as 8.115e-8)`
+  );
+});
+
+test("M5 - an all-zeroGradient domain is rejected rather than reported healthy", () => {
+  // Every side copies its interior velocity and none participates in the flux
+  // balance, so nothing can absorb the net flux the domain carries. The
+  // pre-M5 solver reported 9.889e-8 as converged for a field whose actual
+  // max|div u| was 1.206e-2.
+  const n = 16;
+  const h = 1 / n;
+  const grid = new StaggeredGrid(n, n, h);
+  for (let j = 0; j <= n + 1; j++) {
+    for (let i = 0; i <= n + 1; i++) {
+      const { x, y } = grid.cellCentre(i, j);
+      grid.u[grid.idx(i, j)] = Math.sin(3 * y) + 0.25 * Math.cos(2 * x);
+      grid.v[grid.idx(i, j)] = 0.4 * Math.sin(2 * x) - 0.1 * Math.cos(3 * y);
+    }
+  }
+  const ZG = { type: "zeroGradient" };
+  const nu = 0.01;
+  const params = { nu, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / nu, h / 2), divergenceTol: 1e-7 };
+  const error = captureThrow(() => {
+    for (let k = 0; k < 30; k++) step(grid, { left: ZG, right: ZG, top: ZG, bottom: ZG }, params);
+  });
+  assert.ok(error, "expected a rejection rather than a healthy-looking divergence");
+  assert.equal(error.name, "SolverGeometryError");
+  assert.equal(error.reason, "unbalanced-region");
+  console.log(
+    `[M5 regions] all-zeroGradient domain rejected: forced divergence ` +
+    `${error.regions[0].forcedDivergence.toExponential(2)} (was reported as 9.889e-8 converged)`
   );
 });
