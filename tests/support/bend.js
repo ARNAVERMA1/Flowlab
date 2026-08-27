@@ -17,7 +17,9 @@
 //
 // Test-support code only - nothing here is imported by /solver or /geometry.
 
-import { StaggeredGrid, stampWhere } from "../../geometry/grid.js";
+import { StaggeredGrid } from "../../geometry/grid.js";
+import { applyDocument } from "../../geometry/document.js";
+import { bendDocument } from "../../geometry/documents.js";
 import { step, computeDivergence } from "../../solver/ns2d.js";
 
 const cache = new Map();
@@ -34,25 +36,10 @@ export function buildBend({ w = 1, cpw = 12, legLen = 6, innerRadius = null }) {
   const ny = Math.round(Ly / h);
   const grid = new StaggeredGrid(nx, ny, h);
 
-  let isSolid;
-  if (innerRadius === null) {
-    isSolid = (x, y) => x < Lx - w && y < Ly - w;
-  } else {
-    const ri = innerRadius;
-    const ro = ri + w;
-    const cx = Lx - ro;
-    const cy = Ly - ro;
-    isSolid = (x, y) => {
-      if (x >= cx && y >= cy) {
-        const d = Math.hypot(x - cx, y - cy);
-        return d < ri || d > ro;
-      }
-      if (x < cx) return y < Ly - w; // inlet leg
-      return x < Lx - w; // outlet leg
-    };
-  }
-
-  const solidCells = stampWhere(grid, isSolid);
+  // M5: the duct is a geometry document rather than an inline predicate.
+  // Byte-identical to the predicate it replaced - tests/test11 checks it
+  // cell for cell against a verbatim copy, on this exact grid.
+  const solidCells = applyDocument(grid, bendDocument({ Lx, Ly, w, innerRadius }));
   return { grid, h, w, Lx, Ly, nx, ny, solidCells, innerRadius, legLen };
 }
 

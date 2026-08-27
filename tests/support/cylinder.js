@@ -3,7 +3,9 @@
 //
 // Test-support code only - nothing here is imported by /solver or /geometry.
 
-import { StaggeredGrid, stampCircle } from "../../geometry/grid.js";
+import { StaggeredGrid } from "../../geometry/grid.js";
+import { applyDocument } from "../../geometry/document.js";
+import { cylinderDocument } from "../../geometry/documents.js";
 import { step, computeDivergence } from "../../solver/ns2d.js";
 
 const cache = new Map();
@@ -73,7 +75,9 @@ export function runCylinderToSteadyState({
   const yc = (jc - 0.5) * h;
   const ic = Math.round((xD * D) / h + 0.5);
   const xc = (ic - 0.5) * h;
-  const solidCells = stampCircle(grid, xc, yc, D / 2);
+  // M5: the body is a geometry document rather than a direct stamp. Byte-
+  // identical to stampCircle - tests/test11 checks it cell for cell.
+  const solidCells = applyDocument(grid, cylinderDocument({ cx: xc, cy: yc, radius: D / 2 }));
 
   const bc = cylinderBoundary(U0);
   for (let j = 0; j <= ny + 1; j++) {

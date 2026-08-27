@@ -40,7 +40,9 @@
 
 import { createHash } from "node:crypto";
 
-import { StaggeredGrid, stampCircle, stampWhere } from "../../geometry/grid.js";
+import { StaggeredGrid, stampCircle } from "../../geometry/grid.js";
+import { applyDocument } from "../../geometry/document.js";
+import { bendDocument, cylinderDocument } from "../../geometry/documents.js";
 import { step } from "../../solver/ns2d.js";
 import { cavityBoundary } from "./cavity.js";
 import { cylinderBoundary } from "./cylinder.js";
@@ -86,7 +88,7 @@ function cylinderCase() {
   const grid = new StaggeredGrid(nx, ny, h);
   const jc = (ny + 1) / 2;
   const ic = Math.round(2.5 / h + 0.5);
-  stampCircle(grid, (ic - 0.5) * h, (jc - 0.5) * h, D / 2);
+  applyDocument(grid, cylinderDocument({ cx: (ic - 0.5) * h, cy: (jc - 0.5) * h, radius: D / 2 }));
   for (let j = 0; j <= ny + 1; j++) {
     for (let i = 0; i <= nx + 1; i++) {
       if (!grid.solid[grid.idx(i, j)]) grid.u[grid.idx(i, j)] = U0;
@@ -113,21 +115,7 @@ function bendCase(innerRadius) {
   const Lx = legLen * w + w;
   const nx = Math.round(Lx / h);
   const grid = new StaggeredGrid(nx, nx, h);
-  const isSolid =
-    innerRadius === null
-      ? (x, y) => x < Lx - w && y < Lx - w
-      : (x, y) => {
-          const ro = innerRadius + w;
-          const cx = Lx - ro;
-          const cy = Lx - ro;
-          if (x >= cx && y >= cy) {
-            const d = Math.hypot(x - cx, y - cy);
-            return d < innerRadius || d > ro;
-          }
-          if (x < cx) return y < Lx - w;
-          return x < Lx - w;
-        };
-  stampWhere(grid, isSolid);
+  applyDocument(grid, bendDocument({ Lx, Ly: Lx, w, innerRadius }));
   return {
     grid,
     bc: bendBoundary(U0),

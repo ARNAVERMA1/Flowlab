@@ -10,7 +10,9 @@
 // support code is the wrong direction - but that does mean the two can drift.
 // Anything changed here is no longer the configuration that was validated.
 
-import { StaggeredGrid, stampCircle, stampWhere } from "../geometry/grid.js";
+import { StaggeredGrid } from "../geometry/grid.js";
+import { applyDocument } from "../geometry/document.js";
+import { bendDocument, cylinderDocument } from "../geometry/documents.js";
 
 // Scenarios no longer carry a timestep. The driver calls
 // solver/stability.js computeStableTimestep every step and sizes dt from the
@@ -62,7 +64,10 @@ function cylinderInChannel() {
   const nx = Math.round(14 * cpd);
   const grid = new StaggeredGrid(nx, ny, h);
   const jc = (ny + 1) / 2;
-  stampCircle(grid, (Math.round(3.5 / h + 0.5) - 0.5) * h, (jc - 0.5) * h, D / 2);
+  applyDocument(
+    grid,
+    cylinderDocument({ cx: (Math.round(3.5 / h + 0.5) - 0.5) * h, cy: (jc - 0.5) * h, radius: D / 2 })
+  );
   for (let j = 0; j <= ny + 1; j++) {
     for (let i = 0; i <= nx + 1; i++) {
       if (!grid.solid[grid.idx(i, j)]) grid.u[grid.idx(i, j)] = U;
@@ -98,22 +103,7 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }) {
   const ny = Math.round(Ly / h);
   const grid = new StaggeredGrid(nx, ny, h);
 
-  const isSolid =
-    innerRadius === null
-      ? (x, y) => x < Lx - w && y < Ly - w
-      : (x, y) => {
-          const ri = innerRadius;
-          const ro = ri + w;
-          const cx = Lx - ro;
-          const cy = Ly - ro;
-          if (x >= cx && y >= cy) {
-            const d = Math.hypot(x - cx, y - cy);
-            return d < ri || d > ro;
-          }
-          if (x < cx) return y < Ly - w;
-          return x < Lx - w;
-        };
-  stampWhere(grid, isSolid);
+  applyDocument(grid, bendDocument({ Lx, Ly, w, innerRadius }));
 
   return {
     id,

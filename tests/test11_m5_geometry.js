@@ -25,6 +25,7 @@ import {
   validateDocument,
   GeometryDocumentError,
 } from "../geometry/document.js";
+import { bendDocument, cylinderDocument, emptyDocument } from "../geometry/documents.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
@@ -362,4 +363,206 @@ test("M5 - applyDocument bumps maskVersion so cached topology rebuilds", () => {
   assert.ok(countMask(grid.solid) > 0);
   assert.equal(grid.solid[grid.idx(3, 3)], 0, "the previous document's solid must be gone");
   assert.ok(solidAfterFirst > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Step 2 - the validated scenarios as documents
+// ---------------------------------------------------------------------------
+//
+// GATE 1. Each document must reproduce, cell for cell, the predicate it
+// replaces - on the grid that scenario actually uses, not a convenient one.
+// The originals are copied verbatim into this file rather than imported,
+// because importing the production code would only prove the document agrees
+// with itself. These copies are the record of what the mask was.
+
+// Verbatim from tests/support/bend.js buildBend, which scenarios/index.js
+// duplicates exactly.
+function originalBendPredicate({ Lx, Ly, w, innerRadius }) {
+  if (innerRadius === null) {
+    return (x, y) => x < Lx - w && y < Ly - w;
+  }
+  const ri = innerRadius;
+  const ro = ri + w;
+  const cx = Lx - ro;
+  const cy = Ly - ro;
+  return (x, y) => {
+    if (x >= cx && y >= cy) {
+      const d = Math.hypot(x - cx, y - cy);
+      return d < ri || d > ro;
+    }
+    if (x < cx) return y < Ly - w; // inlet leg
+    return x < Lx - w; // outlet leg
+  };
+}
+
+function compareAgainstPredicate(grid, document, predicate) {
+  const mask = sampleDocument(document, grid);
+  const differing = [];
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      const { x, y } = grid.cellCentre(i, j);
+      const expected = predicate(x, y) ? 1 : 0;
+      if (mask[grid.idx(i, j)] !== expected) differing.push({ i, j, x, y, expected });
+    }
+  }
+  return { mask, differing, solidCells: countMask(mask) };
+}
+
+test("M5 gate 1 - the cylinder document reproduces its stamp exactly", () => {
+  const g = cylinderGeometry();
+  const grid = new StaggeredGrid(g.nx, g.ny, g.h);
+  const stamped = new StaggeredGrid(g.nx, g.ny, g.h);
+  stampCircle(stamped, g.cx, g.cy, g.radius);
+
+  const { mask, solidCells } = compareAgainstPredicate(
+    grid,
+    cylinderDocument({ cx: g.cx, cy: g.cy, radius: g.radius }),
+    // The stamp itself is the reference here, read back cell by cell.
+    (x, y) => false
+  );
+  void mask;
+
+  const differing = [];
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      const k = grid.idx(i, j);
+      const fromDocument = sampleDocument(
+        cylinderDocument({ cx: g.cx, cy: g.cy, radius: g.radius }),
+        grid
+      )[k];
+      if (fromDocument !== stamped.solid[k]) differing.push({ i, j });
+      if (differing.length > 3) break;
+    }
+    if (differing.length > 3) break;
+  }
+  assert.deepEqual(differing, [], `cells differing from stampCircle: ${JSON.stringify(differing)}`);
+  console.log(`[M5 gate 1] cylinder: ${solidCells} solid cells, 0 differing from stampCircle`);
+});
+
+test("M5 gate 1 - both bend documents reproduce their predicates exactly", () => {
+  const w = 1;
+  const cpw = 12;
+  const legLen = 6;
+  const h = w / cpw;
+  const Lx = legLen * w + w;
+  const Ly = Lx;
+  const n = Math.round(Lx / h);
+
+  const report = [];
+  for (const innerRadius of [null, 1]) {
+    const grid = new StaggeredGrid(n, n, h);
+    const { differing, solidCells } = compareAgainstPredicate(
+      grid,
+      bendDocument({ Lx, Ly, w, innerRadius }),
+      originalBendPredicate({ Lx, Ly, w, innerRadius })
+    );
+    assert.deepEqual(
+      differing.slice(0, 5),
+      [],
+      `${innerRadius === null ? "sharp" : "smooth"} bend: ${differing.length} cells differ, ` +
+      `first at ${JSON.stringify(differing[0])}`
+    );
+    report.push(`${innerRadius === null ? "sharp" : "smooth"} ${solidCells} cells`);
+  }
+  console.log(`[M5 gate 1] bend documents match their predicates over ${n * n} cells each: ${report.join(", ")}`);
+});
+
+test("M5 gate 1 - the documents survive a change of resolution", () => {
+  // Not a byte-identity claim - a different grid gives a different mask by
+  // definition. What must hold is that the document is still the same region:
+  // refining the grid should converge the solid fraction, not wander. This is
+  // what makes a document better than a baked mask, and step 5 depends on it.
+  const w = 1;
+  const legLen = 6;
+  const Lx = legLen * w + w;
+  const fractions = [];
+  for (const cpw of [6, 12, 24, 48]) {
+    const h = w / cpw;
+    const n = Math.round(Lx / h);
+    const grid = new StaggeredGrid(n, n, h);
+    const mask = sampleDocument(bendDocument({ Lx, Ly: Lx, w, innerRadius: 1 }), grid);
+    fractions.push({ cpw, fraction: countMask(mask) / (n * n) });
+  }
+  // The exact solid fraction, from the continuum areas. Each straight leg runs
+  // from the wall to the arc's centre - a length of Lx - ro, not Lx - w, which
+  // is where the first version of this test went wrong.
+  const ri = 1;
+  const ro = ri + w;
+  const ductArea = 2 * (Lx - ro) * w + (Math.PI / 4) * (ro * ro - ri * ri);
+  const exact = 1 - ductArea / (Lx * Lx);
+  const errors = fractions.map((f) => Math.abs(f.fraction - exact));
+  assert.ok(
+    errors[3] < errors[0],
+    `refinement should approach the exact solid fraction: ${errors.map((e) => e.toExponential(2))}`
+  );
+  assert.ok(errors[3] < 5e-3, `finest grid is ${errors[3].toExponential(2)} from the exact fraction`);
+  console.log(
+    `[M5 gate 1] solid fraction converging to ${exact.toFixed(6)}: ` +
+    fractions.map((f) => `${f.cpw}cpw ${f.fraction.toFixed(6)}`).join(", ")
+  );
+});
+
+test("M5 - the complement of a closed disk is strictly outside", () => {
+  // `d > r` is `not(d <= r)` - the complement of a CLOSED disk.
+  // `d >= r` is `not(d <  r)` - the complement of an OPEN disk.
+  //
+  // bendDocument relies on the first of these to express the duct's outer
+  // wall. Swapping them moves the wall by exactly the cells sitting on the
+  // radius, and the test below shows the bend has none - so this semantic
+  // test is what justifies the choice, since no sampling of that geometry can.
+  //
+  // (3, 4) is at distance exactly 5 from the origin under both metrics.
+  const closed = { kind: "disk", cx: 0, cy: 0, radius: 5, metric: "euclidean", closed: true };
+  const open = { ...closed, closed: false };
+  assert.equal(Math.hypot(3, 4), 5, "the fixture point must be exactly on the radius");
+
+  assert.equal(testRegion({ not: closed }, 3, 4), false, "d > r must exclude a point on the radius");
+  assert.equal(testRegion({ not: open }, 3, 4), true, "d >= r must include it");
+  assert.equal(testRegion({ not: closed }, 3, 4.0001), true, "and both must include a point outside");
+  assert.equal(testRegion({ not: open }, 3, 4.0001), true);
+
+  // Same under the squared metric, so the derivation does not depend on which.
+  const squaredClosed = { ...closed, metric: "squared" };
+  assert.equal(testRegion({ not: squaredClosed }, 3, 4), false);
+});
+
+test("M5 - no cell centre lands on a bend radius, so gate 1 cannot check that convention", () => {
+  // Stated rather than left as a false impression of coverage. A mutation
+  // swapping `closed: true` for `false` on the bend's outer radius SURVIVES
+  // both gate 1 and the M4 golden fields - not because the gates are weak, but
+  // because the geometry never puts a sample point where the two disagree.
+  //
+  // The cylinder is the opposite case: three of its cell centres land exactly
+  // on the radius, so the same mutation there is caught immediately and moves
+  // peak |u| by 9%.
+  //
+  // If this ever becomes non-zero - a new leg length, a new radius, a new
+  // resolution - the convention becomes checkable and gate 1 starts covering
+  // it. Until then the derivation above is the guarantee.
+  const w = 1;
+  const legLen = 6;
+  const Lx = legLen * w + w;
+  const ri = 1;
+  const ro = ri + w;
+  const cx = Lx - ro;
+  const cy = Lx - ro;
+
+  let onRadius = 0;
+  for (let cpw = 4; cpw <= 32; cpw++) {
+    const h = w / cpw;
+    const n = Math.round(Lx / h);
+    const grid = new StaggeredGrid(n, n, h);
+    for (let j = 1; j <= n; j++) {
+      for (let i = 1; i <= n; i++) {
+        const { x, y } = grid.cellCentre(i, j);
+        const d = Math.hypot(x - cx, y - cy);
+        if (d === ri || d === ro) onRadius++;
+      }
+    }
+  }
+  assert.equal(onRadius, 0, "if this is non-zero the bend's radius convention became checkable");
+  console.log(
+    "[M5 gate 1] no cell centre lands on a bend radius across cpw 4..32, so `<` and `<=` " +
+    "there are indistinguishable by sampling - the complement test above is what pins it"
+  );
 });
