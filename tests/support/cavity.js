@@ -17,6 +17,20 @@ const cache = new Map();
 // the diffusive limit nu*dt/h^2 < 1/4 and the convective limit |u|*dt/h < 1,
 // with a safety factor. Adaptive timestep control is M1 work; this just
 // picks a safe fixed value and reports it.
+// The boundary specification, separated from the run so that the golden-field
+// fixture can drive the SAME object this scenario is validated with rather
+// than a copy of it. A copy would let the two drift, and the whole point of
+// the fixture is to prove a boundary-condition change did not move the
+// physics - which it cannot do if it is checking a different specification.
+export function cavityBoundary(U) {
+  return {
+    left: { type: "wall" },
+    right: { type: "wall" },
+    bottom: { type: "wall" },
+    top: { type: "wall", u: U }, // the sliding lid
+  };
+}
+
 export function runCavityToSteadyState({
   n,
   Re,
@@ -35,12 +49,7 @@ export function runCavityToSteadyState({
   const dt = dtSafety * Math.min((0.25 * h * h) / nu, h / U);
 
   const grid = new StaggeredGrid(n, n, h);
-  const bc = {
-    left: { type: "wall" },
-    right: { type: "wall" },
-    bottom: { type: "wall" },
-    top: { type: "wall", u: U }, // the sliding lid
-  };
+  const bc = cavityBoundary(U);
   const params = { nu, rho, dt, divergenceTol };
 
   const prevU = new Float64Array(grid.u.length);

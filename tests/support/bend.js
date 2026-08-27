@@ -56,6 +56,17 @@ export function buildBend({ w = 1, cpw = 12, legLen = 6, innerRadius = null }) {
   return { grid, h, w, Lx, Ly, nx, ny, solidCells, innerRadius, legLen };
 }
 
+// See the note on cavityBoundary: shared with the golden-field fixture so the
+// two cannot drift apart.
+export function bendBoundary(U0) {
+  return {
+    left: { type: "inflow", u: U0, v: 0 },
+    right: { type: "wall" },
+    top: { type: "wall" },
+    bottom: { type: "outflow" },
+  };
+}
+
 export function runBendToSteadyState({
   Re,
   w = 1,
@@ -77,12 +88,7 @@ export function runBendToSteadyState({
   const { grid, h, nx, ny } = b;
   const nu = (U0 * w) / Re;
 
-  const bc = {
-    left: { type: "inflow", u: U0, v: 0 },
-    right: { type: "wall" },
-    top: { type: "wall" },
-    bottom: { type: "outflow" },
-  };
+  const bc = bendBoundary(U0);
 
   // The timestep has to allow for the flow accelerating through the bend, not
   // just the inlet speed. Estimating the peak at 2*U0 puts the CFL number at

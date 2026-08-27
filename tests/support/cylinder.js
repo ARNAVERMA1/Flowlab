@@ -16,6 +16,17 @@ const cache = new Map();
 // centre of a row of u samples rather than between two of them. That makes
 // the cylinder's staircase mask exactly symmetric about the centreline, so
 // any asymmetry in the result is solver error rather than a lopsided mask.
+// See the note on cavityBoundary: shared with the golden-field fixture so the
+// two cannot drift apart.
+export function cylinderBoundary(U0) {
+  return {
+    left: { type: "inflow", u: U0, v: 0 },
+    right: { type: "outflow" },
+    top: { type: "freeSlip" },
+    bottom: { type: "freeSlip" },
+  };
+}
+
 export function runCylinderToSteadyState({
   Re,
   cpd = 12,
@@ -64,12 +75,7 @@ export function runCylinderToSteadyState({
   const xc = (ic - 0.5) * h;
   const solidCells = stampCircle(grid, xc, yc, D / 2);
 
-  const bc = {
-    left: { type: "inflow", u: U0, v: 0 },
-    right: { type: "outflow" },
-    top: { type: "freeSlip" },
-    bottom: { type: "freeSlip" },
-  };
+  const bc = cylinderBoundary(U0);
   for (let j = 0; j <= ny + 1; j++) {
     for (let i = 0; i <= nx + 1; i++) {
       if (!grid.solid[grid.idx(i, j)]) grid.u[grid.idx(i, j)] = U0;

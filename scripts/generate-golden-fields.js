@@ -1,0 +1,80 @@
+// Records the boundary-condition golden fields.
+//
+//   npm run golden          write tests/fixtures/golden-fields.json
+//   npm run golden -- --diff <caseId>   show where a failing case diverges
+//
+// This is deliberately NOT run as part of the test suite. The fixture is a
+// record of what the solver produced at a known-good commit; regenerating it
+// because a test went red would erase the only evidence that a refactor
+// changed the physics. Regenerate it only when a change to the fields is
+// intended, understood, and described in the commit that does it.
+
+import { writeFile } from "node:fs/promises";
+import { FIXTURE_CASES, measureFixtureCase, runFixtureCase } from "../tests/support/boundaryFixtures.js";
+
+const OUT = new URL("../tests/fixtures/golden-fields.json", import.meta.url).pathname;
+
+// A hash mismatch says the field changed but not where. This prints the first
+// cells that differ against the current code, so a failure is diagnosable
+// rather than merely red. It needs a second field to compare against, which
+// only exists once someone has a suspect build - so it takes the case id and
+// reports the field's own structure: where the extremes sit, and what the
+// boundary rows look like, which is where a boundary bug shows first.
+function describe(caseId) {
+  const entry = FIXTURE_CASES.find((c) => c.id === caseId);
+  if (!entry) {
+    process.stderr.write(`no such case: ${caseId}\nknown: ${FIXTURE_CASES.map((c) => c.id).join(", ")}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const grid = runFixtureCase(entry);
+  const line = (label, values) =>
+    `${label.padEnd(18)} ${values.map((v) => (Number.isFinite(v) ? v.toFixed(6).padStart(11) : "        NaN")).join(" ")}`;
+
+  process.stdout.write(`case ${entry.id} - ${entry.description}\n`);
+  process.stdout.write(`grid ${grid.nx}x${grid.ny}\n\n`);
+  process.stdout.write("Boundary rows and columns, where a misplaced wall shows first:\n");
+  const mid = Math.max(1, Math.round(grid.ny / 2));
+  const midX = Math.max(1, Math.round(grid.nx / 2));
+  const sample = (n) => Array.from({ length: Math.min(6, n) }, (_, k) => k + 1);
+  process.stdout.write(line("u ghost i=0", sample(grid.ny).map((j) => grid.u[grid.idx(0, j)])) + "\n");
+  process.stdout.write(line("u face i=1", sample(grid.ny).map((j) => grid.u[grid.idx(1, j)])) + "\n");
+  process.stdout.write(line(`u face i=nx`, sample(grid.ny).map((j) => grid.u[grid.idx(grid.nx, j)])) + "\n");
+  process.stdout.write(line(`v ghost j=0`, sample(grid.nx).map((i) => grid.v[grid.idx(i, 0)])) + "\n");
+  process.stdout.write(line(`v face j=ny`, sample(grid.nx).map((i) => grid.v[grid.idx(i, grid.ny)])) + "\n");
+  process.stdout.write(line(`u ghost j=ny+1`, sample(grid.nx).map((i) => grid.u[grid.idx(i, grid.ny + 1)])) + "\n");
+  process.stdout.write(line(`p row j=mid`, sample(grid.nx).map((i) => grid.p[grid.idx(i, mid)])) + "\n");
+  process.stdout.write(line(`p col i=mid`, sample(grid.ny).map((j) => grid.p[grid.idx(midX, j)])) + "\n");
+}
+
+async function main() {
+  const diffAt = process.argv.indexOf("--diff");
+  if (diffAt !== -1) {
+    describe(process.argv[diffAt + 1]);
+    return;
+  }
+
+  const cases = {};
+  for (const entry of FIXTURE_CASES) {
+    const measured = measureFixtureCase(entry);
+    cases[entry.id] = measured;
+    process.stderr.write(
+      `${entry.id.padEnd(28)} u=${measured.u.slice(0, 16)} ` +
+      `peak |u|=${measured.peakU === null ? "NaN" : measured.peakU.toFixed(6)}\n`
+    );
+  }
+
+  const record = {
+    note:
+      "Golden boundary-condition fields. Generated BEFORE the M4 refactor, from " +
+      "the solver as it stood at that commit. A mismatch means a change moved the " +
+      "physics; regenerate only when that is intended and say so in the commit. " +
+      "Run `npm run golden -- --diff <caseId>` to inspect a failing case.",
+    generatedAt: new Date().toISOString().replace("T", " ").replace(/\..*/, " UTC"),
+    cases,
+  };
+  await writeFile(OUT, JSON.stringify(record, null, 2) + "\n", "utf8");
+  process.stderr.write(`\nwrote ${OUT}\n`);
+}
+
+await main();

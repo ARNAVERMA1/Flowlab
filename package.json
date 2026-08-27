@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test tests/*.js",
     "serve": "node scripts/serve.js",
-    "validate": "node scripts/generate-validation-doc.js"
+    "validate": "node scripts/generate-validation-doc.js",
+    "golden": "node scripts/generate-golden-fields.js"
   }
 }
