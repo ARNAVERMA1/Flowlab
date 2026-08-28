@@ -238,7 +238,7 @@ export function applyVelocityBoundaryConditions(grid, bc, u, v) {
   applySideBoundary(grid, plan, "bottom", u, v);
   applySideBoundary(grid, plan, "top", u, v);
 
-  applySolidBoundaryConditions(grid, u, v);
+  applySolidBoundaryConditions(grid, u, v, plan.surfaces);
   return enforceFluxBalance(grid, plan, u, v);
 }
 
@@ -260,9 +260,55 @@ export function applyVelocityBoundaryConditions(grid, bc, u, v) {
 // simply zeroing those faces. The test suite does not resolve that
 // difference, so this choice rests on the argument above rather than on
 // measurement.
-export function applySolidBoundaryConditions(grid, u, v) {
+export function applySolidBoundaryConditions(grid, u, v, surfaces = null) {
   const { nx, ny, solid } = grid;
   const idx = idxFor(grid);
+
+  // What a surface face's normal component becomes. Without an attachment this
+  // is zero - no-slip, as it always was - and the whole branch is skipped when
+  // no surface conditions are declared, so every existing scenario takes the
+  // identical path.
+  const normalAt = (table, faceIndex, current, interior) => {
+    if (surfaces === null) return 0;
+    const index = table[faceIndex];
+    if (index < 0) return 0;
+    const attachment = surfaces.attachments.find((a) => a.index === index);
+    const condition = attachment.condition;
+    switch (condition.type) {
+      case "wall":
+      case "freeSlip":
+        return 0;
+      case "inflow":
+        // Cartesian: the sign says which way along the axis, not whether it
+        // enters. Same convention as every domain-edge condition.
+        return condition[table === surfaces.u ? "u" : "v"];
+      case "flowInlet":
+        return attachment.faceVelocity;
+      case "outflow":
+      case "zeroGradient":
+        return interior;
+      case "pressure":
+        // A predictor only; the projection sets this face from the pressure
+        // gradient, exactly as it does on a domain edge.
+        return interior;
+      default:
+        return 0;
+    }
+  };
+
+  // Whether a surface adjacent to an in-body face lets the fluid slip along
+  // it, and how fast that surface is moving tangentially. Looked up from the
+  // PERPENDICULAR face's attachment: a u-face buried in the body is the
+  // tangential ghost for the horizontal surface above or below it, which is a
+  // v-face. Unambiguous because an attachment that prescribes anything must be
+  // axis-aligned, so every face it covers agrees.
+  const tangentialRule = (table, faceIndex) => {
+    if (surfaces === null) return null;
+    const index = table[faceIndex];
+    if (index < 0) return null;
+    const attachment = surfaces.attachments.find((a) => a.index === index);
+    return attachment.condition;
+  };
 
   for (let j = 1; j <= ny; j++) {
     for (let i = 0; i <= nx; i++) {
@@ -271,14 +317,18 @@ export function applySolidBoundaryConditions(grid, u, v) {
       if (!a && !b) continue;
       const k = idx(i, j);
       if (a !== b) {
-        u[k] = 0; // on the surface, normal component
+        // On the surface: the normal component, from whatever condition is
+        // attached here.
+        u[k] = normalAt(surfaces?.u, k, u[k], a ? u[idx(i + 1, j)] : u[idx(i - 1, j)]);
         continue;
       }
       const fluidAbove = !solid[idx(i, j + 1)] && !solid[idx(i + 1, j + 1)];
       const fluidBelow = !solid[idx(i, j - 1)] && !solid[idx(i + 1, j - 1)];
-      if (fluidAbove && !fluidBelow) u[k] = -u[idx(i, j + 1)];
-      else if (fluidBelow && !fluidAbove) u[k] = -u[idx(i, j - 1)];
-      else u[k] = 0;
+      if (fluidAbove && !fluidBelow) {
+        u[k] = reflectTangential(u[idx(i, j + 1)], tangentialRule(surfaces?.v, idx(i, j)) ?? tangentialRule(surfaces?.v, idx(i + 1, j)), "u");
+      } else if (fluidBelow && !fluidAbove) {
+        u[k] = reflectTangential(u[idx(i, j - 1)], tangentialRule(surfaces?.v, idx(i, j - 1)) ?? tangentialRule(surfaces?.v, idx(i + 1, j - 1)), "u");
+      } else u[k] = 0;
     }
   }
 
@@ -289,16 +339,32 @@ export function applySolidBoundaryConditions(grid, u, v) {
       if (!a && !b) continue;
       const k = idx(i, j);
       if (a !== b) {
-        v[k] = 0;
+        v[k] = normalAt(surfaces?.v, k, v[k], a ? v[idx(i, j + 1)] : v[idx(i, j - 1)]);
         continue;
       }
       const fluidRight = !solid[idx(i + 1, j)] && !solid[idx(i + 1, j + 1)];
       const fluidLeft = !solid[idx(i - 1, j)] && !solid[idx(i - 1, j + 1)];
-      if (fluidRight && !fluidLeft) v[k] = -v[idx(i + 1, j)];
-      else if (fluidLeft && !fluidRight) v[k] = -v[idx(i - 1, j)];
-      else v[k] = 0;
+      if (fluidRight && !fluidLeft) {
+        v[k] = reflectTangential(v[idx(i + 1, j)], tangentialRule(surfaces?.u, idx(i, j)) ?? tangentialRule(surfaces?.u, idx(i, j + 1)), "v");
+      } else if (fluidLeft && !fluidRight) {
+        v[k] = reflectTangential(v[idx(i - 1, j)], tangentialRule(surfaces?.u, idx(i - 1, j)) ?? tangentialRule(surfaces?.u, idx(i - 1, j + 1)), "v");
+      } else v[k] = 0;
     }
   }
+}
+
+// The tangential ghost just inside a body.
+//
+// With no attachment, or a stationary wall, this is the reflection that has
+// always been here: it places zero exactly on the cell boundary where the
+// surface is, rather than half a cell inside the body. A moving wall reflects
+// about its own speed instead, and free slip copies the value out, which is
+// what "no shear" means.
+function reflectTangential(neighbour, condition, component) {
+  if (condition === null || condition === undefined) return -neighbour;
+  if (condition.type === "freeSlip") return neighbour;
+  if (condition.type === "wall") return 2 * (condition[component] ?? 0) - neighbour;
+  return -neighbour;
 }
 
 // Rescales faces on "outflow" sides so outflow matches inflow, PER CONNECTED
@@ -342,6 +408,11 @@ function enforceFluxBalance(grid, plan, u, v) {
   // Net flux counted positive *into* the domain, per region.
   const nets = new Float64Array(regionCount);
   const outflowCounts = new Int32Array(regionCount);
+  // A region touching a prescribed-pressure boundary determines its own flux
+  // through it, so it is never "unbalanceable" in the sense the rejection
+  // below means. Without this a pressure-driven region whose predictor happens
+  // not to balance would be refused for a geometry that is perfectly sound.
+  const freeBoundary = new Uint8Array(regionCount);
   const faces = [];
 
   for (let j = 1; j <= ny; j++) {
@@ -351,6 +422,8 @@ function enforceFluxBalance(grid, plan, u, v) {
     const rR = label[idx(nx, j)];
     if (rL >= 0) nets[rL] += u[kL] * h;
     if (rR >= 0) nets[rR] -= u[kR] * h;
+    if (plan.pressureMask[plan.faces.left[j]] && !solid[idx(1, j)]) freeBoundary[label[idx(1, j)]] = 1;
+    if (plan.pressureMask[plan.faces.right[j]] && !solid[idx(nx, j)]) freeBoundary[label[idx(nx, j)]] = 1;
     if (outflowMask[isOutflow.left[j]] && !solid[idx(1, j)]) {
       const region = label[idx(1, j)];
       outflowCounts[region] += 1;
@@ -369,6 +442,8 @@ function enforceFluxBalance(grid, plan, u, v) {
     const rT = label[idx(i, ny)];
     if (rB >= 0) nets[rB] += v[kB] * h;
     if (rT >= 0) nets[rT] -= v[kT] * h;
+    if (plan.pressureMask[plan.faces.bottom[i]] && !solid[idx(i, 1)]) freeBoundary[label[idx(i, 1)]] = 1;
+    if (plan.pressureMask[plan.faces.top[i]] && !solid[idx(i, ny)]) freeBoundary[label[idx(i, ny)]] = 1;
     if (outflowMask[isOutflow.bottom[i]] && !solid[idx(i, 1)]) {
       const region = label[idx(i, 1)];
       outflowCounts[region] += 1;
@@ -395,6 +470,58 @@ function enforceFluxBalance(grid, plan, u, v) {
   // Where every outlet of a region faces the same way the two forms are
   // identical - sign factors out - which is every validated scenario, and the
   // golden fields confirm it.
+  // Surface faces take part in the same balance. EVERY attached face
+  // contributes its influx, not only the outflow ones: a flow-rate inlet
+  // drawn on a block injects mass into the region exactly as a domain inlet
+  // does, and leaving it out of the net means nothing compensates for it.
+  //
+  // Measured when it was left out: a blowing face delivered its requested
+  // 0.15 exactly, and the field it produced had a divergence of 5.3e-2
+  // against a bound of 1e-7 - with nothing throwing, because the region did
+  // have an outlet and the residual could not see the inconsistency. The same
+  // blind spot as the two bugs step 3 turned up.
+  //
+  // Faces with no attachment are walls carrying exactly zero, so skipping them
+  // is the same as summing them. Collected after the domain edges so the
+  // accumulation order over those is untouched, and skipped entirely when no
+  // surface conditions are declared.
+  if (plan.surfaces !== null) {
+    const { surfaces } = plan;
+    const visit = (table, arr, k, solidSide, fluidCell) => {
+      const index = table[k];
+      if (index < 0) return;
+      const region = label[fluidCell];
+      if (region < 0) return;
+      const condition = surfaces.conditions[index];
+      // Fluid on the low side means the outward normal points along +axis, so
+      // influx into the fluid is -value*h.
+      const sign = solidSide ? 1 : -1;
+      nets[region] += sign * arr[k] * h;
+      if (condition.type === "outflow") {
+        outflowCounts[region] += 1;
+        faces.push({ arr, k, sign, region });
+      } else if (condition.type === "pressure") {
+        freeBoundary[region] = 1;
+      }
+    };
+    for (let j = 1; j <= ny; j++) {
+      for (let i = 0; i <= nx; i++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i + 1, j)]) continue;
+        visit(surfaces.u, u, k, a, a ? idx(i + 1, j) : k);
+      }
+    }
+    for (let i = 1; i <= nx; i++) {
+      for (let j = 0; j <= ny; j++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i, j + 1)]) continue;
+        visit(surfaces.v, v, k, a, a ? idx(i, j + 1) : k);
+      }
+    }
+  }
+
   const deltas = new Float64Array(regionCount);
   for (let r = 0; r < regionCount; r++) {
     if (outflowCounts[r] === 0) continue;
@@ -408,7 +535,7 @@ function enforceFluxBalance(grid, plan, u, v) {
   // divergence bound that was promised.
   let unbalanced = null;
   for (let r = 0; r < regionCount; r++) {
-    if (outflowCounts[r] !== 0 || nets[r] === 0) continue;
+    if (outflowCounts[r] !== 0 || freeBoundary[r] || nets[r] === 0) continue;
     (unbalanced ??= []).push({
       region: r,
       netFlux: nets[r],
@@ -716,8 +843,45 @@ function correctVelocities(grid, F, G, dt, rho, plan) {
   // is imposed, and it is exactly what makes the divergence of the corrected
   // field equal the Laplacian assembled in scratchFor. The identity behind the
   // divergence check in step() depends on the two agreeing.
-  if (!plan?.hasPressure) return;
+  if (!plan?.hasPressure && !plan?.surfaces?.hasSurfacePressure) return;
   const scale = (2 * dt) / (rho * h);
+
+  // Pressure attached to a drawn surface. `a` says which side the solid sits
+  // on, which flips the gradient's sign exactly as the left and right domain
+  // edges differ from each other.
+  if (plan?.surfaces?.hasSurfacePressure) {
+    const { surfaces } = plan;
+    const boundaryPressure = (table, k) => {
+      const index = table[k];
+      if (index < 0) return null;
+      const condition = surfaces.conditions[index];
+      return condition.type === "pressure" ? condition.p : null;
+    };
+    for (let j = 1; j <= ny; j++) {
+      for (let i = 0; i <= nx; i++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i + 1, j)]) continue;
+        const pb = boundaryPressure(surfaces.u, k);
+        const fluidCell = a ? idx(i + 1, j) : k;
+        if (pb === null || solid[fluidCell]) continue;
+        u[k] = a ? F[k] - scale * (p[fluidCell] - pb) : F[k] - scale * (pb - p[fluidCell]);
+      }
+    }
+    for (let i = 1; i <= nx; i++) {
+      for (let j = 0; j <= ny; j++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i, j + 1)]) continue;
+        const pb = boundaryPressure(surfaces.v, k);
+        const fluidCell = a ? idx(i, j + 1) : k;
+        if (pb === null || solid[fluidCell]) continue;
+        v[k] = a ? G[k] - scale * (p[fluidCell] - pb) : G[k] - scale * (pb - p[fluidCell]);
+      }
+    }
+  }
+
+  if (!plan?.hasPressure) return;
   for (let j = 1; j <= ny; j++) {
     if (plan.pressureMask[plan.faces.left[j]] && !solid[idx(1, j)]) {
       const k = idx(0, j);
@@ -811,6 +975,39 @@ function scratchFor(grid, plan) {
     }
   }
 
+  // The same elimination for a pressure condition attached to a drawn surface.
+  // The face lies between a fluid cell and a solid one, and the solid cell's
+  // pressure slot plays the ghost, so the arithmetic is identical to a domain
+  // edge - only the geometry differs.
+  if (plan?.surfaces?.hasSurfacePressure) {
+    dirichletRHS ??= new Float64Array(size);
+    const { surfaces } = plan;
+    const attach = (table, k, fluidCell) => {
+      const index = table[k];
+      if (index < 0 || solid[fluidCell]) return;
+      const condition = surfaces.conditions[index];
+      if (condition.type !== "pressure") return;
+      counts[fluidCell] += 2;
+      dirichletRHS[fluidCell] += 2 * condition.p;
+    };
+    for (let j = 1; j <= ny; j++) {
+      for (let i = 0; i <= nx; i++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i + 1, j)]) continue;
+        attach(surfaces.u, k, a ? idx(i + 1, j) : k);
+      }
+    }
+    for (let i = 1; i <= nx; i++) {
+      for (let j = 0; j <= ny; j++) {
+        const k = idx(i, j);
+        const a = solid[k];
+        if (a === solid[idx(i, j + 1)]) continue;
+        attach(surfaces.v, k, a ? idx(i, j + 1) : k);
+      }
+    }
+  }
+
   s = {
     F: new Float64Array(size),
     G: new Float64Array(size),
@@ -825,7 +1022,7 @@ function scratchFor(grid, plan) {
       // With a prescribed pressure anywhere the constant null space is gone,
       // and projecting it out would remove a component the boundary condition
       // legitimately fixes.
-      singular: !plan?.hasPressure,
+      singular: !plan?.hasPressure && !plan?.surfaces?.hasSurfacePressure,
       // CG work vectors, allocated once per grid rather than per timestep.
       work: {
         r: new Float64Array(size),

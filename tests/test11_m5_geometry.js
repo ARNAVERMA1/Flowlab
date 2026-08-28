@@ -29,6 +29,7 @@ import { bendDocument, cylinderDocument, emptyDocument } from "../geometry/docum
 import { fluidRegions } from "../geometry/regions.js";
 import { step, computeDivergence, boundaryPlanFor } from "../solver/ns2d.js";
 import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
+import { compileBoundaryConditions } from "../boundaries/compile.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
@@ -874,5 +875,258 @@ test("M5 - an all-zeroGradient domain is rejected rather than reported healthy",
   console.log(
     `[M5 regions] all-zeroGradient domain rejected: forced divergence ` +
     `${error.regions[0].forcedDivergence.toExponential(2)} (was reported as 9.889e-8 converged)`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Step 4 - conditions attached to drawn surfaces
+// ---------------------------------------------------------------------------
+
+function channelWithBlock({ cpw = 20, length = 3 } = {}) {
+  const h = 1 / cpw;
+  const grid = new StaggeredGrid(Math.round(length / h), cpw, h);
+  applyDocument(grid, {
+    operations: [{ op: "add", region: { kind: "rect", x0: 1.0, y0: 0.3, x1: 1.4, y1: 0.7 } }],
+  });
+  return {
+    grid, h,
+    params: {
+      nu: 0.02, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / 0.02, h / 4),
+      divergenceTol: 1e-7, poissonMaxIterations: 20000,
+    },
+  };
+}
+
+// u-face midpoints sit at cell BOUNDARIES (x = i*h) while v-face midpoints sit
+// at cell CENTRES (x = (i-0.5)*h), so a narrow band around a boundary selects
+// only faces of one orientation. Getting this wrong is the easiest mistake to
+// make when writing a selector, and it shows up as a staircase rejection.
+const upstreamFace = { kind: "rect", x0: 0.99, y0: 0.29, x1: 1.01, y1: 0.71 };
+const downstreamFace = { kind: "rect", x0: 1.39, y0: 0.29, x1: 1.41, y1: 0.71 };
+const wholeDomain = { kind: "rect", x0: -1, y0: -1, x1: 9, y1: 9 };
+
+const CHANNEL_BC = {
+  left: { type: "inflow", u: 1, v: 0 },
+  right: { type: "outflow" },
+  top: { type: "wall" },
+  bottom: { type: "wall" },
+};
+
+test("M5 - a surface attachment selects the faces its region covers", () => {
+  const { grid } = channelWithBlock();
+  const plan = boundaryPlanFor(grid, {
+    ...CHANNEL_BC,
+    surfaces: [{ where: upstreamFace, type: "inflow", u: -0.5 }],
+  });
+  const attachment = plan.surfaces.attachments[0];
+  assert.equal(attachment.faceCount, 8, "the block's upstream face is 8 cells tall");
+  assert.equal(attachment.axisAligned, true);
+  assert.equal(attachment.normal, "+x", "fluid on the left means the outward normal is +x");
+
+  // Faces the attachment did not claim keep the default, which is -1.
+  let claimed = 0;
+  for (let k = 0; k < plan.surfaces.u.length; k++) if (plan.surfaces.u[k] >= 0) claimed++;
+  for (let k = 0; k < plan.surfaces.v.length; k++) if (plan.surfaces.v[k] >= 0) claimed++;
+  assert.equal(claimed, 8, "only the selected faces are claimed");
+  console.log(
+    `[M5 surfaces] block upstream face: ${attachment.faceCount} faces, normal ${attachment.normal}`
+  );
+});
+
+test("M5 - a staircase surface refuses anything that prescribes flux", () => {
+  // A circle's surface is a staircase whose faces point four different ways.
+  // Prescribing "velocity 1 through this surface" on such a set gives a flow
+  // at 45 degrees to the surface rather than through it, so it is refused
+  // rather than approximated.
+  const grid = new StaggeredGrid(20, 20, 0.05);
+  applyDocument(grid, {
+    operations: [{ op: "add", region: { kind: "disk", cx: 0.5, cy: 0.5, radius: 0.2, metric: "squared", closed: true } }],
+  });
+  const box = { left: { type: "wall" }, right: { type: "wall" }, top: { type: "wall" }, bottom: { type: "wall" } };
+
+  for (const condition of [
+    { type: "inflow", u: 1 },
+    { type: "flowInlet", flowRate: 0.1 },
+    { type: "outflow" },
+    { type: "pressure", p: 1 },
+  ]) {
+    const error = captureThrow(() =>
+      compileBoundaryConditions(grid, { ...box, surfaces: [{ where: wholeDomain, ...condition }] })
+    );
+    assert.ok(error, `"${condition.type}" on a staircase should be refused`);
+    assert.equal(error.name, "BoundarySpecError");
+    assert.match(error.message, /different outward normals/);
+    assert.match(error.message, /cut-cell or immersed-boundary/);
+  }
+
+  // The orientation-free conditions are allowed on the same surface: a no-slip
+  // wall sets the normal component to zero whichever way it points, and free
+  // slip copies the tangential component.
+  for (const condition of [{ type: "wall" }, { type: "freeSlip" }]) {
+    const plan = compileBoundaryConditions(grid, { ...box, surfaces: [{ where: wholeDomain, ...condition }] });
+    const attachment = plan.surfaces.attachments[0];
+    assert.equal(attachment.axisAligned, false);
+    assert.equal(attachment.normals.size, 4, "a circle's staircase faces four ways");
+    assert.ok(attachment.faceCount > 0);
+  }
+  console.log("[M5 surfaces] circle staircase: 4 normals - flux conditions refused, wall and freeSlip allowed");
+});
+
+test("M5 - a selector that matches no surface is refused", () => {
+  // Silently doing nothing is harder to notice than being told.
+  const { grid } = channelWithBlock();
+  const error = captureThrow(() =>
+    compileBoundaryConditions(grid, {
+      ...CHANNEL_BC,
+      surfaces: [{ where: { kind: "rect", x0: 2.5, y0: 0.1, x1: 2.6, y1: 0.2 }, type: "wall" }],
+    })
+  );
+  assert.ok(error);
+  assert.match(error.message, /selects no faces at all/);
+});
+
+test("M5 - a flow-rate inlet on a surface delivers its rate AND stays divergence-free", () => {
+  // Both halves matter, and the second is a regression guard. When the flux
+  // balance counted surface OUTflow but not surface INflow, this delivered
+  // exactly its 0.15 while producing a field whose divergence was 5.3e-2
+  // against a bound of 1e-7 - and nothing threw, because the region did have
+  // an outlet and the residual could not see the inconsistency.
+  const { grid, params } = channelWithBlock();
+  const Q = 0.15;
+  const bc = {
+    ...CHANNEL_BC,
+    surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: -Q }],
+  };
+  const plan = boundaryPlanFor(grid, bc);
+  for (let n = 0; n < 300; n++) step(grid, bc, params);
+
+  const divergence = computeDivergence(grid).max;
+  assert.ok(divergence < params.divergenceTol, `max|div u| is ${divergence.toExponential(3)}`);
+
+  let delivered = 0;
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 0; i <= grid.nx; i++) {
+      const k = grid.idx(i, j);
+      const a = grid.solid[k];
+      if (a === grid.solid[grid.idx(i + 1, j)]) continue;
+      if (plan.surfaces.u[k] < 0) continue;
+      delivered += (a ? 1 : -1) * grid.u[k] * grid.h;
+    }
+  }
+  assert.ok(Math.abs(delivered - Q) < 1e-12, `delivered ${delivered}, asked for ${Q}`);
+  console.log(
+    `[M5 surfaces] blowing face delivered ${delivered.toFixed(12)} against ${Q}, ` +
+    `max|div u| ${divergence.toExponential(2)}`
+  );
+});
+
+test("M5 - a parabolic profile is refused on a surface", () => {
+  // The faces an attachment covers are a set, not a line: there is no
+  // unambiguous ordering across them to shape a profile along.
+  const { grid } = channelWithBlock();
+  const error = captureThrow(() =>
+    compileBoundaryConditions(grid, {
+      ...CHANNEL_BC,
+      surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: 0.1, profile: "parabolic" }],
+    })
+  );
+  assert.ok(error);
+  assert.match(error.message, /only the "uniform" profile/);
+  assert.match(error.message, /a set, not a line/);
+});
+
+test("M5 - pressure on a drawn surface drives flow and stays divergence-free", () => {
+  // A closed box with a block whose upstream and downstream faces carry
+  // different pressures. Nothing prescribes a velocity anywhere; the
+  // projection determines the flow entirely from the two surface pressures.
+  const { grid, params } = channelWithBlock();
+  const bc = {
+    left: { type: "wall" }, right: { type: "wall" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+    surfaces: [
+      { where: upstreamFace, type: "pressure", p: 1 },
+      { where: downstreamFace, type: "pressure", p: 0 },
+    ],
+  };
+  const plan = boundaryPlanFor(grid, bc);
+  assert.equal(plan.surfaces.hasSurfacePressure, true);
+  assert.equal(plan.surfaces.attachments.length, 2);
+
+  for (let n = 0; n < 400; n++) step(grid, bc, params);
+  const divergence = computeDivergence(grid).max;
+  assert.ok(divergence < params.divergenceTol, `max|div u| is ${divergence.toExponential(3)}`);
+
+  let peak = 0;
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      const k = grid.idx(i, j);
+      if (!grid.solid[k]) peak = Math.max(peak, Math.hypot(grid.u[k], grid.v[k]));
+    }
+  }
+  assert.ok(peak > 0.1, `the pressure difference should drive a flow, peak speed ${peak}`);
+  console.log(
+    `[M5 surfaces] surface pressure 1 -> 0 drove a peak speed of ${peak.toFixed(4)}, ` +
+    `max|div u| ${divergence.toExponential(2)}`
+  );
+});
+
+test("M5 - free slip on a surface exerts no drag where a wall does", () => {
+  // The tangential treatment, which is what separates the two. A no-slip
+  // surface reflects the tangential component about the wall value; free slip
+  // copies it out, so the fluid slides past.
+  const run = (type) => {
+    const { grid, params } = channelWithBlock();
+    const bc = { ...CHANNEL_BC, surfaces: [{ where: wholeDomain, type }] };
+    for (let n = 0; n < 250; n++) step(grid, bc, params);
+    // Speed in the cell column just above the block, where the difference
+    // between sliding and sticking shows.
+    const j = Math.round(0.75 / grid.h);
+    let total = 0;
+    let count = 0;
+    for (let i = Math.round(1.0 / grid.h); i < Math.round(1.4 / grid.h); i++) {
+      total += grid.u[grid.idx(i, j)];
+      count++;
+    }
+    return total / count;
+  };
+  const noSlip = run("wall");
+  const slip = run("freeSlip");
+  assert.ok(slip > noSlip, `free slip should be faster over the block: ${slip} vs ${noSlip}`);
+  console.log(
+    `[M5 surfaces] mean speed over the block: wall ${noSlip.toFixed(4)}, ` +
+    `freeSlip ${slip.toFixed(4)} (${((slip / noSlip - 1) * 100).toFixed(1)}% faster)`
+  );
+});
+
+test("M5 - a moving surface drags the fluid along with it", () => {
+  // The tangential ghost inside the body reflects about the surface's own
+  // speed rather than about zero. Looked up from the perpendicular face's
+  // attachment, which is unambiguous because anything prescribing a value has
+  // to be axis-aligned.
+  const run = (speed) => {
+    const { grid, params } = channelWithBlock();
+    const topFace = { kind: "rect", x0: 1.01, y0: 0.69, x1: 1.39, y1: 0.71 };
+    const bc = {
+      left: { type: "wall" }, right: { type: "wall" },
+      top: { type: "wall" }, bottom: { type: "wall" },
+      surfaces: [{ where: topFace, type: "wall", u: speed }],
+    };
+    for (let n = 0; n < 250; n++) step(grid, bc, params);
+    const j = Math.round(0.75 / grid.h);
+    let total = 0;
+    let count = 0;
+    for (let i = Math.round(1.05 / grid.h); i < Math.round(1.35 / grid.h); i++) {
+      total += grid.u[grid.idx(i, j)];
+      count++;
+    }
+    return total / count;
+  };
+  const still = run(0);
+  const moving = run(1);
+  assert.ok(Math.abs(still) < 1e-6, `a stationary surface should drive nothing, got ${still}`);
+  assert.ok(moving > 0.05, `a moving surface should drag the fluid, got ${moving}`);
+  console.log(
+    `[M5 surfaces] surface moving at u = 1 dragged the fluid above it to ${moving.toFixed(4)} ` +
+    `(stationary: ${still.toExponential(1)})`
   );
 });

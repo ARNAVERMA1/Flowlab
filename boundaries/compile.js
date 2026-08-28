@@ -32,6 +32,7 @@
 import {
   BOUNDARY_TYPES, FLOW_PROFILES, SIDES, SIDE_ORIENTATION, isKnownType, normalComponent,
 } from "./conditions.js";
+import { testRegion, validateRegion } from "../geometry/document.js";
 
 export class BoundarySpecError extends Error {
   constructor(message) {
@@ -302,6 +303,175 @@ function fillRun(profile, condition, side, start, end, openAt, h) {
   for (const [t, value] of shape) profile[t] = value * scale;
 }
 
+// Conditions attached to DRAWN surfaces - the faces where fluid meets solid
+// inside the domain, rather than the four edges.
+//
+// An attachment selects faces by a REGION, using the same primitive vocabulary
+// a geometry document is written in:
+//
+//   surfaces: [ { where: { kind: "rect", x0: 1, y0: 0.4, x1: 1.1, y1: 0.6 },
+//                 type: "inflow", u: 1 } ]
+//
+// The original plan was to attach by parameter range along a shape's outline.
+// A region selector is better on every count that matters here: it is
+// resolution-independent in the same way, it needs no new geometry language,
+// it works for a mask assembled from several overlapping shapes where "the
+// outline" is not well defined, and it can be drawn on screen directly. Faces
+// no attachment claims keep the default no-slip wall.
+//
+// ---------------------------------------------------------------------------
+// WHY SOME CONDITIONS ARE REFUSED ON SOME SURFACES
+// ---------------------------------------------------------------------------
+//
+// A single face is always axis-aligned - a u-face has its normal along x, a
+// v-face along y. A SURFACE is not. A diagonal wall is represented as a
+// staircase whose faces alternate between x-normal and y-normal, and
+// prescribing "velocity 1 through this surface" on such a set does not mean
+// what it appears to: setting both orientations to 1 produces a flow of
+// magnitude sqrt(2) at 45 degrees, not 1 normal to the surface the user drew.
+//
+// Getting that right needs a cut-cell or immersed-boundary treatment, which is
+// a change to the solver rather than to boundary bookkeeping. So an attachment
+// whose faces do not all share one outward normal is refused for anything that
+// prescribes flux - inlets, outlets, pressure - and allowed for the conditions
+// that are orientation-free: a no-slip wall sets the normal component to zero
+// whichever way it points, and free slip copies the tangential component.
+//
+// The check is on the COMPILED face set, not on the shape that selected it, so
+// it measures what the staircase actually is rather than what it was meant to
+// approximate.
+
+const FACE_NORMALS = { "+x": 0, "-x": 1, "+y": 2, "-y": 3 };
+
+function compileSurfaces(grid, entries) {
+  if (!entries) return null;
+  if (!Array.isArray(entries)) {
+    throw new BoundarySpecError(`"surfaces" must be an array of attachments`);
+  }
+  if (entries.length === 0) return null;
+
+  const { nx, ny, h, solid } = grid;
+  const size = grid.u.length;
+  const conditions = [];
+  const attachments = [];
+  const u = new Int32Array(size).fill(-1);
+  const v = new Int32Array(size).fill(-1);
+
+  entries.forEach((entry, n) => {
+    const where = `surface attachment ${n}`;
+    if (!entry || typeof entry !== "object") {
+      throw new BoundarySpecError(`${where}: expected an attachment object`);
+    }
+    if (!entry.where) {
+      throw new BoundarySpecError(
+        `${where}: needs a "where" region selecting which surface faces it applies to`
+      );
+    }
+    validateRegion(entry.where, `${where}.where`);
+    const { where: selector, ...condition } = entry;
+    // Surface faces have no "side", so the side-dependent checks in
+    // validateCondition do not apply. Validate against both orientations by
+    // checking the type and its parameters directly.
+    if (!isKnownType(condition.type)) {
+      throw new BoundarySpecError(
+        `${where}: unknown boundary type "${condition.type}". ` +
+        `Known types: ${Object.keys(BOUNDARY_TYPES).join(", ")}`
+      );
+    }
+    const index = conditions.length;
+    conditions.push(Object.freeze({ ...condition }));
+    attachments.push({ index, condition: conditions[index], faceCount: 0, normals: new Set() });
+  });
+
+  const claim = (array, faceIndex, midX, midY, normal) => {
+    for (let n = 0; n < entries.length; n++) {
+      if (!testRegion(entries[n].where, midX, midY)) continue;
+      // Later attachments win, matching the painter's model a document uses.
+      array[faceIndex] = attachments[n].index;
+    }
+    const claimed = array[faceIndex];
+    if (claimed < 0) return;
+    const attachment = attachments.find((a) => a.index === claimed);
+    attachment.faceCount++;
+    attachment.normals.add(normal);
+  };
+
+  // u-faces: the surface runs vertically, the normal along x.
+  for (let j = 1; j <= ny; j++) {
+    for (let i = 0; i <= nx; i++) {
+      const k = grid.idx(i, j);
+      const a = solid[k];
+      const b = solid[grid.idx(i + 1, j)];
+      if (a === b) continue; // not a surface face
+      claim(u, k, i * h, (j - 0.5) * h, a ? "-x" : "+x");
+    }
+  }
+  // v-faces: the surface runs horizontally, the normal along y.
+  for (let i = 1; i <= nx; i++) {
+    for (let j = 0; j <= ny; j++) {
+      const k = grid.idx(i, j);
+      const a = solid[k];
+      const b = solid[grid.idx(i, j + 1)];
+      if (a === b) continue;
+      claim(v, k, (i - 0.5) * h, j * h, a ? "-y" : "+y");
+    }
+  }
+
+  for (const attachment of attachments) {
+    const { condition, faceCount, normals } = attachment;
+    const family = BOUNDARY_TYPES[condition.type].family;
+    attachment.axisAligned = normals.size === 1;
+    attachment.normal = normals.size === 1 ? [...normals][0] : null;
+    attachment.family = family;
+
+    if (faceCount === 0) {
+      throw new BoundarySpecError(
+        `a "${condition.type}" surface attachment selects no faces at all. ` +
+        `Its region does not touch any boundary between fluid and solid, so it would ` +
+        `silently do nothing - which is harder to notice than being told.`
+      );
+    }
+    if (condition.type === "flowInlet") {
+      if (condition.profile && condition.profile !== "uniform") {
+        throw new BoundarySpecError(
+          `a flow-rate inlet on a drawn surface supports only the "uniform" profile, not ` +
+          `"${condition.profile}". A parabolic profile needs an unambiguous ordering across ` +
+          `the opening, and a surface selected by region has no such ordering - the faces are ` +
+          `a set, not a line. Split the surface into segments if you need a shaped inlet.`
+        );
+      }
+      // Cartesian, like every other velocity in this system: flowRate is the
+      // integral of the normal COMPONENT over the attachment, so its sign says
+      // which way along the axis the flow goes rather than whether it enters.
+      attachment.faceVelocity = condition.flowRate / (faceCount * grid.h);
+    }
+    if (family === "wall" || family === "open") continue;
+
+    if (!attachment.axisAligned) {
+      throw new BoundarySpecError(
+        `a "${condition.type}" attachment covers ${faceCount} surface faces with ` +
+        `${normals.size} different outward normals (${[...normals].join(", ")}). ` +
+        `That is a staircase approximation of a slanted or curved surface, and ` +
+        `prescribing flux through it does not mean what it looks like: setting both ` +
+        `orientations to the same value gives a flow at 45 degrees to the surface, ` +
+        `not through it. Doing this properly needs a cut-cell or immersed-boundary ` +
+        `treatment, which is a solver change and out of scope here. Use "wall" or ` +
+        `"freeSlip" on a staircase surface, or select an axis-aligned stretch.`
+      );
+    }
+  }
+
+  return {
+    conditions,
+    attachments,
+    u,
+    v,
+    hasSurfaceConditions: true,
+    hasSurfacePressure: attachments.some((a) => a.condition.type === "pressure"),
+    hasSurfaceOutflow: attachments.some((a) => a.condition.type === "outflow"),
+  };
+}
+
 export function compileBoundaryConditions(grid, spec) {
   if (!spec || typeof spec !== "object") {
     throw new BoundarySpecError(`expected a boundary specification object, got ${spec}`);
@@ -398,6 +568,7 @@ export function compileBoundaryConditions(grid, spec) {
 
   return {
     conditions,
+    surfaces: compileSurfaces(grid, spec.surfaces),
     outflowMask,
     pressureMask,
     hasPressure: usesPressure,
