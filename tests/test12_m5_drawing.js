@@ -268,6 +268,9 @@ test("the preview highlights exactly the cells the sampler will change", () => {
 
   assert.ok(previewed.size > 0);
   assert.deepEqual([...previewed].sort(), [...marked].sort());
+  console.log(
+    `[M5 drawing] preview and sampler agree on all ${previewed.size} cells of a drawn circle`
+  );
 });
 
 test("a drawn circle samples identically to stampCircle, the validated predicate", () => {
@@ -439,4 +442,30 @@ test("an edited domain is reported by comparing masks, not counting edits", asyn
   // And erasing the scenario's own shape is unambiguously a different domain.
   session.removeEdit(0);
   assert.equal(session.geometryMatchesScenario, false);
+});
+
+test("a shape too thin to catch a cell is valid and changes nothing", () => {
+  // Sampling is at cell centres, so a drag narrower than a cell produces a
+  // well-formed rectangle covering no cells - as does one drawn entirely
+  // inside an existing wall. Both are legal; the readout is what has to say
+  // they will do nothing, before the release rather than after it.
+  const grid = grid64();
+  const { controller, at } = controllerFor(grid);
+  controller.setTool("rectangle");
+  controller.down(...at(0.5, 0.1));
+  controller.move(...at(0.5 + grid.h / 8, 0.9));
+  const thin = controller.pending;
+  assert.notEqual(thin, null, "a sub-cell rectangle is still a valid shape");
+  const tint = controller.tintFor(grid);
+  let covered = 0;
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) if (tint(i, j) !== null) covered++;
+  }
+  assert.equal(covered, 0);
+  controller.cancel();
+
+  // And a drag with no width at all is not a shape at all.
+  controller.down(...at(0.5, 0.1));
+  controller.move(...at(0.5, 0.9));
+  assert.equal(controller.pending, null);
 });

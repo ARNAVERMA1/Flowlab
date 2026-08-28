@@ -9,8 +9,10 @@
 // Deliberately NOT part of `npm test`: it re-runs the expensive cases and would
 // roughly double the suite. It is the body of `npm run validate`.
 
-import { StaggeredGrid } from "../geometry/grid.js";
-import { step, computeDivergence } from "../solver/ns2d.js";
+import { StaggeredGrid, stampCircle } from "../geometry/grid.js";
+import { step, computeDivergence, boundaryPlanFor } from "../solver/ns2d.js";
+import { sampleDocument } from "../geometry/document.js";
+import { bendDocument, cylinderDocument } from "../geometry/documents.js";
 
 import {
   runCavityToSteadyState,
@@ -36,6 +38,17 @@ import {
   maxVelocityOnSolidSurface as maxVelocityOnDuctWalls,
 } from "../tests/support/bend.js";
 import { decayingShearMode } from "../tests/support/analytical.js";
+import {
+  BLOCK_UPSTREAM_FACE,
+  CHANNEL_BC,
+  bendGeometry,
+  channelWithBlock,
+  compareAgainstPredicate,
+  cylinderGeometry,
+  fluxThroughAttachment,
+  maxVelocityOnUnclaimedSurface,
+  originalBendPredicate,
+} from "../tests/support/geometry.js";
 
 function compareRow(computed, reference, table, Re) {
   let worst = 0;
@@ -304,6 +317,77 @@ function measurePressureChannel() {
   ];
 }
 
+// The M5 geometry pipeline, against exact invariants only.
+//
+// The first claim is the one everything else in this record rests on: that
+// expressing a scenario's geometry as a document reproduces the mask its
+// results were measured with, cell for cell. If that ever stops holding, every
+// benchmark above is describing a domain the solver is no longer running.
+function measureDrawnGeometry() {
+  let differing = 0;
+
+  const g = cylinderGeometry();
+  const cylinderGrid = new StaggeredGrid(g.nx, g.ny, g.h);
+  const stamped = new StaggeredGrid(g.nx, g.ny, g.h);
+  stampCircle(stamped, g.cx, g.cy, g.radius);
+  const cylinderMask = sampleDocument(
+    cylinderDocument({ cx: g.cx, cy: g.cy, radius: g.radius }),
+    cylinderGrid
+  );
+  let cylinderCells = 0;
+  for (let k = 0; k < cylinderMask.length; k++) {
+    cylinderCells += cylinderMask[k];
+    if (cylinderMask[k] !== stamped.solid[k]) differing++;
+  }
+
+  const b = bendGeometry();
+  for (const innerRadius of [null, 1]) {
+    const grid = new StaggeredGrid(b.n, b.n, b.h);
+    const comparison = compareAgainstPredicate(
+      grid,
+      bendDocument({ Lx: b.Lx, Ly: b.Ly, w: b.w, innerRadius }),
+      originalBendPredicate({ Lx: b.Lx, Ly: b.Ly, w: b.w, innerRadius })
+    );
+    differing += comparison.differing.length;
+  }
+
+  // A rate prescribed through a drawn surface, run to steady state. The
+  // divergence claim beside it is the regression guard: this delivered its rate
+  // exactly while carrying a divergence of 5.3e-2 when the flux balance counted
+  // surface outflow but not surface inflow.
+  const { grid, params } = channelWithBlock();
+  const Q = 0.15;
+  const bc = { ...CHANNEL_BC, surfaces: [{ where: BLOCK_UPSTREAM_FACE, type: "flowInlet", flowRate: -Q }] };
+  const plan = boundaryPlanFor(grid, bc);
+  for (let n = 0; n < 300; n++) step(grid, bc, params);
+  const delivered = fluxThroughAttachment(grid, plan);
+
+  return [
+    {
+      quantity: "cells differing between document and original predicate (3 scenarios)",
+      measured: differing,
+      context:
+        `cylinder ${cylinderCells} solid cells on a ${g.nx}x${g.ny} grid, ` +
+        `plus both bends over ${b.n * b.n} cells each`,
+    },
+    {
+      quantity: "surface flow rate delivered vs requested",
+      measured: Math.abs(delivered - Q),
+      context: `asked for ${Q} through the block's upstream face, delivered ${delivered.toFixed(15)}`,
+    },
+    {
+      quantity: "velocity on drawn solid surfaces",
+      measured: maxVelocityOnUnclaimedSurface(grid, plan),
+      context: "the block's other faces, which carry plain no-slip",
+    },
+    {
+      quantity: "max|div u| with a surface inlet driving the flow",
+      measured: computeDivergence(grid).max,
+      context: "after 300 steps",
+    },
+  ];
+}
+
 const MEASURERS = {
   "still-water": measureStillWater,
   "uniform-channel": measureUniformChannel,
@@ -312,6 +396,7 @@ const MEASURERS = {
   "cylinder-wake": measureCylinder,
   "channel-bend": measureBend,
   "pressure-driven-channel": measurePressureChannel,
+  "drawn-geometry": measureDrawnGeometry,
 };
 
 export async function measureCase(caseId) {

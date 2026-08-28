@@ -34,33 +34,24 @@ import { measureBoundaryFlux } from "../visualization/boundaryOverlay.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { GeometryEditor, TOOLS } from "../geometry/editor.js";
 import { SimulationSession } from "../ui/session.js";
+import {
+  BLOCK_DOWNSTREAM_FACE,
+  BLOCK_UPSTREAM_FACE,
+  CHANNEL_BC,
+  WHOLE_DOMAIN,
+  bendGeometry,
+  channelWithBlock,
+  compareAgainstPredicate,
+  countMask,
+  cylinderGeometry,
+  fluxThroughAttachment,
+  originalBendPredicate,
+} from "./support/geometry.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
 // check the document reproduces THAT arithmetic; importing the scenario would
 // only prove the document agrees with itself.
-function cylinderGeometry() {
-  const D = 1;
-  const cpd = 12;
-  const h = D / cpd;
-  let ny = Math.round(6 * cpd);
-  if (ny % 2 === 0) ny += 1;
-  const nx = Math.round(14 * cpd);
-  const jc = (ny + 1) / 2;
-  return {
-    D, h, nx, ny,
-    cx: (Math.round(3.5 / h + 0.5) - 0.5) * h,
-    cy: (jc - 0.5) * h,
-    radius: D / 2,
-  };
-}
-
-function countMask(mask) {
-  let n = 0;
-  for (let k = 0; k < mask.length; k++) n += mask[k];
-  return n;
-}
-
 function firstDifference(a, b, grid) {
   for (let j = 1; j <= grid.ny; j++) {
     for (let i = 1; i <= grid.nx; i++) {
@@ -385,37 +376,6 @@ test("M5 - applyDocument bumps maskVersion so cached topology rebuilds", () => {
 
 // Verbatim from tests/support/bend.js buildBend, which scenarios/index.js
 // duplicates exactly.
-function originalBendPredicate({ Lx, Ly, w, innerRadius }) {
-  if (innerRadius === null) {
-    return (x, y) => x < Lx - w && y < Ly - w;
-  }
-  const ri = innerRadius;
-  const ro = ri + w;
-  const cx = Lx - ro;
-  const cy = Ly - ro;
-  return (x, y) => {
-    if (x >= cx && y >= cy) {
-      const d = Math.hypot(x - cx, y - cy);
-      return d < ri || d > ro;
-    }
-    if (x < cx) return y < Ly - w; // inlet leg
-    return x < Lx - w; // outlet leg
-  };
-}
-
-function compareAgainstPredicate(grid, document, predicate) {
-  const mask = sampleDocument(document, grid);
-  const differing = [];
-  for (let j = 1; j <= grid.ny; j++) {
-    for (let i = 1; i <= grid.nx; i++) {
-      const { x, y } = grid.cellCentre(i, j);
-      const expected = predicate(x, y) ? 1 : 0;
-      if (mask[grid.idx(i, j)] !== expected) differing.push({ i, j, x, y, expected });
-    }
-  }
-  return { mask, differing, solidCells: countMask(mask) };
-}
-
 test("M5 gate 1 - the cylinder document reproduces its stamp exactly", () => {
   const g = cylinderGeometry();
   const grid = new StaggeredGrid(g.nx, g.ny, g.h);
@@ -448,13 +408,7 @@ test("M5 gate 1 - the cylinder document reproduces its stamp exactly", () => {
 });
 
 test("M5 gate 1 - both bend documents reproduce their predicates exactly", () => {
-  const w = 1;
-  const cpw = 12;
-  const legLen = 6;
-  const h = w / cpw;
-  const Lx = legLen * w + w;
-  const Ly = Lx;
-  const n = Math.round(Lx / h);
+  const { w, h, Lx, Ly, n } = bendGeometry();
 
   const report = [];
   for (const innerRadius of [null, 1]) {
@@ -886,41 +840,11 @@ test("M5 - an all-zeroGradient domain is rejected rather than reported healthy",
 // Step 4 - conditions attached to drawn surfaces
 // ---------------------------------------------------------------------------
 
-function channelWithBlock({ cpw = 20, length = 3 } = {}) {
-  const h = 1 / cpw;
-  const grid = new StaggeredGrid(Math.round(length / h), cpw, h);
-  applyDocument(grid, {
-    operations: [{ op: "add", region: { kind: "rect", x0: 1.0, y0: 0.3, x1: 1.4, y1: 0.7 } }],
-  });
-  return {
-    grid, h,
-    params: {
-      nu: 0.02, rho: 1, dt: 0.4 * Math.min((0.25 * h * h) / 0.02, h / 4),
-      divergenceTol: 1e-7, poissonMaxIterations: 20000,
-    },
-  };
-}
-
-// u-face midpoints sit at cell BOUNDARIES (x = i*h) while v-face midpoints sit
-// at cell CENTRES (x = (i-0.5)*h), so a narrow band around a boundary selects
-// only faces of one orientation. Getting this wrong is the easiest mistake to
-// make when writing a selector, and it shows up as a staircase rejection.
-const upstreamFace = { kind: "rect", x0: 0.99, y0: 0.29, x1: 1.01, y1: 0.71 };
-const downstreamFace = { kind: "rect", x0: 1.39, y0: 0.29, x1: 1.41, y1: 0.71 };
-const wholeDomain = { kind: "rect", x0: -1, y0: -1, x1: 9, y1: 9 };
-
-const CHANNEL_BC = {
-  left: { type: "inflow", u: 1, v: 0 },
-  right: { type: "outflow" },
-  top: { type: "wall" },
-  bottom: { type: "wall" },
-};
-
 test("M5 - a surface attachment selects the faces its region covers", () => {
   const { grid } = channelWithBlock();
   const plan = boundaryPlanFor(grid, {
     ...CHANNEL_BC,
-    surfaces: [{ where: upstreamFace, type: "inflow", u: -0.5 }],
+    surfaces: [{ where: BLOCK_UPSTREAM_FACE, type: "inflow", u: -0.5 }],
   });
   const attachment = plan.surfaces.attachments[0];
   assert.equal(attachment.faceCount, 8, "the block's upstream face is 8 cells tall");
@@ -955,7 +879,7 @@ test("M5 - a staircase surface refuses anything that prescribes flux", () => {
     { type: "pressure", p: 1 },
   ]) {
     const error = captureThrow(() =>
-      compileBoundaryConditions(grid, { ...box, surfaces: [{ where: wholeDomain, ...condition }] })
+      compileBoundaryConditions(grid, { ...box, surfaces: [{ where: WHOLE_DOMAIN, ...condition }] })
     );
     assert.ok(error, `"${condition.type}" on a staircase should be refused`);
     assert.equal(error.name, "BoundarySpecError");
@@ -967,7 +891,7 @@ test("M5 - a staircase surface refuses anything that prescribes flux", () => {
   // wall sets the normal component to zero whichever way it points, and free
   // slip copies the tangential component.
   for (const condition of [{ type: "wall" }, { type: "freeSlip" }]) {
-    const plan = compileBoundaryConditions(grid, { ...box, surfaces: [{ where: wholeDomain, ...condition }] });
+    const plan = compileBoundaryConditions(grid, { ...box, surfaces: [{ where: WHOLE_DOMAIN, ...condition }] });
     const attachment = plan.surfaces.attachments[0];
     assert.equal(attachment.axisAligned, false);
     assert.equal(attachment.normals.size, 4, "a circle's staircase faces four ways");
@@ -999,7 +923,7 @@ test("M5 - a flow-rate inlet on a surface delivers its rate AND stays divergence
   const Q = 0.15;
   const bc = {
     ...CHANNEL_BC,
-    surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: -Q }],
+    surfaces: [{ where: BLOCK_UPSTREAM_FACE, type: "flowInlet", flowRate: -Q }],
   };
   const plan = boundaryPlanFor(grid, bc);
   for (let n = 0; n < 300; n++) step(grid, bc, params);
@@ -1007,16 +931,7 @@ test("M5 - a flow-rate inlet on a surface delivers its rate AND stays divergence
   const divergence = computeDivergence(grid).max;
   assert.ok(divergence < params.divergenceTol, `max|div u| is ${divergence.toExponential(3)}`);
 
-  let delivered = 0;
-  for (let j = 1; j <= grid.ny; j++) {
-    for (let i = 0; i <= grid.nx; i++) {
-      const k = grid.idx(i, j);
-      const a = grid.solid[k];
-      if (a === grid.solid[grid.idx(i + 1, j)]) continue;
-      if (plan.surfaces.u[k] < 0) continue;
-      delivered += (a ? 1 : -1) * grid.u[k] * grid.h;
-    }
-  }
+  const delivered = fluxThroughAttachment(grid, plan);
   assert.ok(Math.abs(delivered - Q) < 1e-12, `delivered ${delivered}, asked for ${Q}`);
   console.log(
     `[M5 surfaces] blowing face delivered ${delivered.toFixed(12)} against ${Q}, ` +
@@ -1031,7 +946,7 @@ test("M5 - a parabolic profile is refused on a surface", () => {
   const error = captureThrow(() =>
     compileBoundaryConditions(grid, {
       ...CHANNEL_BC,
-      surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: 0.1, profile: "parabolic" }],
+      surfaces: [{ where: BLOCK_UPSTREAM_FACE, type: "flowInlet", flowRate: 0.1, profile: "parabolic" }],
     })
   );
   assert.ok(error);
@@ -1048,8 +963,8 @@ test("M5 - pressure on a drawn surface drives flow and stays divergence-free", (
     left: { type: "wall" }, right: { type: "wall" },
     top: { type: "wall" }, bottom: { type: "wall" },
     surfaces: [
-      { where: upstreamFace, type: "pressure", p: 1 },
-      { where: downstreamFace, type: "pressure", p: 0 },
+      { where: BLOCK_UPSTREAM_FACE, type: "pressure", p: 1 },
+      { where: BLOCK_DOWNSTREAM_FACE, type: "pressure", p: 0 },
     ],
   };
   const plan = boundaryPlanFor(grid, bc);
@@ -1080,7 +995,7 @@ test("M5 - free slip on a surface exerts no drag where a wall does", () => {
   // copies it out, so the fluid slides past.
   const run = (type) => {
     const { grid, params } = channelWithBlock();
-    const bc = { ...CHANNEL_BC, surfaces: [{ where: wholeDomain, type }] };
+    const bc = { ...CHANNEL_BC, surfaces: [{ where: WHOLE_DOMAIN, type }] };
     for (let n = 0; n < 250; n++) step(grid, bc, params);
     // Speed in the cell column just above the block, where the difference
     // between sliding and sticking shows.
@@ -1155,7 +1070,7 @@ test("M5 hunt - the boundary flux readout counts drawn surfaces", () => {
   const { grid, params } = channelWithBlock();
   const bc = {
     ...CHANNEL_BC,
-    surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: -0.3 }],
+    surfaces: [{ where: BLOCK_UPSTREAM_FACE, type: "flowInlet", flowRate: -0.3 }],
   };
   const plan = boundaryPlanFor(grid, bc);
   for (let n = 0; n < 300; n++) step(grid, bc, params);
@@ -1212,7 +1127,7 @@ test("M5 hunt - dye can leave through a drawn outlet", () => {
     right: { type: "wall" },
     top: { type: "wall" },
     bottom: { type: "wall" },
-    surfaces: [{ where: downstreamFace, type: "outflow" }],
+    surfaces: [{ where: BLOCK_DOWNSTREAM_FACE, type: "outflow" }],
   };
   const tracer = new PassiveTracer(grid);
   tracer.seed(grid, () => 1);

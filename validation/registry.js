@@ -53,6 +53,37 @@
 // most of this project's life and turned out to contain one wrong digit that
 // was materially changing a reported error. Anything still carrying that label
 // should be assumed to have the same problem until someone checks it.
+//
+// ---------------------------------------------------------------------------
+// EVERY CLAIM HERE IS CONDITIONAL ON THE DOMAIN
+// ---------------------------------------------------------------------------
+//
+// Until M5 this went without saying: the geometry of each case was fixed in
+// code, so "the cylinder is benchmarked" and "the domain on screen is the
+// cylinder" were the same statement. Once geometry can be drawn they are not.
+// A recorded wake length shown beside a cylinder the viewer has just erased is
+// the exact failure this registry exists to prevent, wearing the registry's
+// own clothes.
+//
+// So the classifications below describe each case's OWN geometry and nothing
+// else. When the domain differs, the measurements do not apply and are
+// withdrawn rather than annotated - a caveat under a table of numbers is read
+// after the numbers. The panel does that in ui/validationPanel.js, on a flag
+// the session computes by comparing the sampled MASK against the scenario's
+// own (ui/session.js).
+//
+// The mask, specifically - not an edit counter and not a document comparison.
+// Both proxies are wrong on ordinary gestures and both err toward crying wolf:
+// a document edited and undone back has a nonzero revision and an identical
+// domain, and a shape drawn inside an existing wall changes the document and
+// no cells. Asking the property of interest rather than a proxy for it is the
+// same rule that produced the RHS-consistency detector in solver/ns2d.js; see
+// docs/M5-interactive-geometry.md sections 6 and 9.
+//
+// Nothing here validates a drawn domain, and nothing could: there is no
+// reference for a shape someone just drew. What survives an edit is the
+// solver's own invariants - divergence, flux balance, finiteness - which the
+// harness reports live and which hold on any domain the solver accepts.
 
 export const CLASSIFICATIONS = ["benchmarked", "self-validated", "demonstration"];
 export const VERIFICATION_LEVELS = ["derived", "verified", "unverified"];
@@ -283,11 +314,46 @@ export const CASES = [
       { quantity: "flow-rate inlet delivered vs requested (relative)", reference: 0, tolerance: 1e-13, referenceType: "invariant" },
     ],
   },
+  {
+    id: "drawn-geometry",
+    label: "Drawn geometry and surface conditions",
+    classification: "self-validated",
+    measuredBy: "tests/test11_m5_geometry.js",
+    rationale:
+      "The M5 geometry pipeline, checked against exact invariants only. Two " +
+      "things are established here and nothing else. First, that expressing the " +
+      "existing scenarios as geometry documents reproduces their masks CELL FOR " +
+      "CELL - the claim every other case in this record silently depends on, " +
+      "since a benchmark measured on one domain says nothing about another. " +
+      "Second, that conditions attached to drawn surfaces behave exactly like " +
+      "the domain-edge conditions M4 validated: a prescribed rate through a " +
+      "surface is delivered to roundoff, no-slip on a drawn wall is exactly " +
+      "zero, and the projection still delivers its divergence bound with a " +
+      "surface driving the flow. The last is a regression guard with history: " +
+      "when the flux balance counted surface outflow but not surface inflow, " +
+      "the rate was delivered exactly while the field carried a divergence of " +
+      "5.3e-2 against a bound of 1e-7, and nothing threw.",
+    caveat:
+      "Nothing here is benchmarked and nothing here validates a DRAWN domain - " +
+      "there is no external reference for a shape someone just drew. These are " +
+      "invariants that hold on any domain the solver accepts. Drawn shapes are " +
+      "also sampled onto the uniform grid rather than meshed, so the staircase " +
+      "error of about one cell applies to anything drawn.",
+    claims: [
+      { quantity: "cells differing between document and original predicate (3 scenarios)", reference: 0, tolerance: 0, referenceType: "invariant" },
+      { quantity: "surface flow rate delivered vs requested", reference: 0, tolerance: 1e-12, referenceType: "invariant" },
+      { quantity: "velocity on drawn solid surfaces", reference: 0, tolerance: 0, referenceType: "invariant" },
+      { quantity: "max|div u| with a surface inlet driving the flow", reference: 0, tolerance: 1e-7, referenceType: "invariant" },
+    ],
+  },
 ];
 
 // Harness scenarios map onto cases. A scenario the panel can show but that no
 // case validates would be a "demonstration", and the panel must say so rather
 // than presenting it like the rest.
+//
+// A mapping asserts the case validates the scenario AS THE SCENARIO DEFINES
+// IT. Nothing here survives the geometry being edited; see the note above.
 export const SCENARIO_VALIDATION = {
   "bend-sharp": { case: "channel-bend" },
   "bend-smooth": { case: "channel-bend" },

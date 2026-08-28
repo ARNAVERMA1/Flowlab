@@ -551,7 +551,11 @@ export class Harness {
       set("#geompreview", this.drawing.tool === "select" ? "pick a tool to draw" : "-");
     } else {
       const becomes = preview.operation.op === "add" ? "become solid" : "become fluid";
-      set("#geompreview", `${integer(preview.changing)} cells ${becomes}`);
+      // Zero is flagged rather than just printed. A drag narrower than a cell
+      // is a perfectly valid shape that samples to nothing, and so is one drawn
+      // entirely inside an existing wall - both look like the tool is broken
+      // unless the readout says, before release, that this will change nothing.
+      set("#geompreview", `${integer(preview.changing)} cells ${becomes}`, preview.changing === 0);
     }
 
     root.querySelector("#undo").disabled = !session.canUndo;

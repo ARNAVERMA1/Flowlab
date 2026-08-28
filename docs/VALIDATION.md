@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-28 18:46:22 UTC.
+Generated 2026-08-28 19:09:37 UTC.
 
 ## How to read this
 
@@ -15,6 +15,8 @@ Generated 2026-08-28 18:46:22 UTC.
 - `demonstration` — neither — runs and looks plausible
 
 The distinction carries real weight. A cavity agreeing with published measurements and a bend separating where physical reasoning says it should are not the same kind of claim, and presenting them identically would mislead by omission.
+
+**Every number below describes that case's own geometry.** The harness can now draw into a domain, and a measurement made on one domain says nothing about another. When the geometry on screen differs from the scenario's own, the panel withdraws these numbers rather than annotating them. What still holds on any domain the solver accepts are its own invariants — divergence, flux balance, finiteness — which the harness reports live.
 
 **Reference verification** — how far the reference itself can be trusted:
 
@@ -33,6 +35,7 @@ The distinction carries real weight. A cavity agreeing with published measuremen
 | Flow past a circular cylinder | `benchmarked` | cylinderWakeLength | `unverified` |
 | 90-degree channel bend | `self-validated` | planePoiseuille | `derived` |
 | Pressure-driven channel | `benchmarked` | planePoiseuille | `derived` |
+| Drawn geometry and surface conditions | `self-validated` | invariants only | — |
 
 ## Still water
 
@@ -179,6 +182,23 @@ The M4 pressure boundary condition checked against closed form. Nothing prescrib
 | flux deviation inlet to outlet | 0 | 9.113e-11<br><sub>the flux is an output here, so its constancy is a real check</sub> | 1.000e-8 | pass |
 | flow-rate inlet delivered vs requested (relative) | 0 | 0<br><sub>asked for 0.6, delivered 0.600000000000000</sub> | 1.000e-13 | pass |
 
+## Drawn geometry and surface conditions
+
+**Classification:** `self-validated` — checked against exact invariants and its own grid convergence; nothing external says the answer is right
+
+**Asserted by:** `tests/test11_m5_geometry.js`
+
+The M5 geometry pipeline, checked against exact invariants only. Two things are established here and nothing else. First, that expressing the existing scenarios as geometry documents reproduces their masks CELL FOR CELL - the claim every other case in this record silently depends on, since a benchmark measured on one domain says nothing about another. Second, that conditions attached to drawn surfaces behave exactly like the domain-edge conditions M4 validated: a prescribed rate through a surface is delivered to roundoff, no-slip on a drawn wall is exactly zero, and the projection still delivers its divergence bound with a surface driving the flow. The last is a regression guard with history: when the flux balance counted surface outflow but not surface inflow, the rate was delivered exactly while the field carried a divergence of 5.3e-2 against a bound of 1e-7, and nothing threw.
+
+> ⚠️ **Caveat.** Nothing here is benchmarked and nothing here validates a DRAWN domain - there is no external reference for a shape someone just drew. These are invariants that hold on any domain the solver accepts. Drawn shapes are also sampled onto the uniform grid rather than meshed, so the staircase error of about one cell applies to anything drawn.
+
+| quantity | reference | measured | tolerance | result |
+|---|---|---|---|---|
+| cells differing between document and original predicate (3 scenarios) | 0 | 0<br><sub>cylinder 113 solid cells on a 168x73 grid, plus both bends over 7056 cells each</sub> | 0 | pass |
+| surface flow rate delivered vs requested | 0 | 0<br><sub>asked for 0.15 through the block's upstream face, delivered 0.150000000000000</sub> | 1.000e-12 | pass |
+| velocity on drawn solid surfaces | 0 | 0<br><sub>the block's other faces, which carry plain no-slip</sub> | 0 | pass |
+| max\|div u\| with a surface inlet driving the flow | 0 | 9.399e-8<br><sub>after 300 steps</sub> | 1.000e-7 | pass |
+
 ## Known limitations
 
 Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
@@ -192,7 +212,9 @@ Carried forward from `docs/M1-solver-hardening.md`, which has the detail:
 
 From `docs/M3-visualization.md`, and bearing on what this document does NOT cover: the dye tracer added in M3 is a visualization aid, not a result. No case below validates it, nothing external says a dye pattern is right, and the harness labels it accordingly. The pressure view shows the first-order Chorin projection pressure, which is not the true pressure near walls.
 
-From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient with a global flux rescale, which reflects vortices back into the domain - adequate for the steady cases validated here, and a real limitation for unsteady wakes. A convective outflow was deferred rather than adopted, because changing it would perturb the cylinder benchmark. Obstacle surfaces carry uniform no-slip and are not configurable.
+From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient with a per-region flux rescale, which reflects vortices back into the domain - adequate for the steady cases validated here, and a real limitation for unsteady wakes. A convective outflow was deferred rather than adopted, because changing it would perturb the cylinder benchmark.
+
+From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the existing uniform grid - cell centres tested against a region - not meshed, so the staircase limitation above applies to anything drawn as much as to the cylinder. Solid surfaces can now carry the full condition set where they are axis-aligned; on a staircase surface, which has no single normal, only wall and free-slip are allowed and a flux-prescribing condition is refused rather than approximated. A domain whose fluid splits into regions is solved when every region's flux can be absorbed and REJECTED WITH A REASON when it cannot, rather than reported as converged; the pre-M5 solver reported 8.1e-8 for a field whose actual max|div u| was 2.950e-1 in one such case. The outer domain stays a rectangle and per-region pressure solving is deferred.
 
 **1 reference is still unverified** (cylinderWakeLength). Any claim resting on it is weaker than the rest of this document, and should be read that way. Each one records what closing it would take, so it stays a piece of open work rather than a permanent disclaimer:
 

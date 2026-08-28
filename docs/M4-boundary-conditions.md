@@ -228,12 +228,17 @@ visible.
 ## 6. Deferred, explicitly
 
 - **Convective outflow** `∂u/∂t + U_c·∂u/∂n = 0`. The present outlet is
-  zero-gradient plus global flux rescale, adequate for the validated cases but
+  zero-gradient plus a flux rescale (global here; made per-region in M5, see
+  `docs/M5-interactive-geometry.md` §4), adequate for the validated cases but
   it **reflects vortices at the outlet**. Replacing it would perturb Test 5, a
   validated benchmark, for a benefit nothing in M4 asks for.
 - **Boundary conditions on obstacle surfaces.** Obstacle surfaces remain uniform
   no-slip. Segment-parameterising an interior staircase boundary is a
   substantially harder problem than the domain edges.
+  *Delivered in M5* — the full condition set on axis-aligned surface segments,
+  wall and free-slip only on staircase surfaces, and flux-prescribing conditions
+  on mixed normals refused rather than approximated. See
+  `docs/M5-interactive-geometry.md` §5.
 - **Time-varying and arbitrary-profile inlets** — M6 territory.
 
 ## Two bugs worth recording

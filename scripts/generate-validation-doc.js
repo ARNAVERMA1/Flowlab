@@ -94,6 +94,15 @@ async function main() {
     "mislead by omission."
   );
   lines.push("");
+  lines.push(
+    "**Every number below describes that case's own geometry.** The harness can " +
+    "now draw into a domain, and a measurement made on one domain says nothing " +
+    "about another. When the geometry on screen differs from the scenario's own, " +
+    "the panel withdraws these numbers rather than annotating them. What still " +
+    "holds on any domain the solver accepts are its own invariants — divergence, " +
+    "flux balance, finiteness — which the harness reports live."
+  );
+  lines.push("");
   lines.push("**Reference verification** — how far the reference itself can be trusted:");
   lines.push("");
   for (const [name, meaning] of Object.entries(VERIFICATION_BADGE)) {
@@ -229,11 +238,24 @@ async function main() {
   lines.push("");
   lines.push(
     "From `docs/M4-boundary-conditions.md`: the outlet condition is zero-gradient " +
-    "with a global flux rescale, which reflects vortices back into the domain - " +
+    "with a per-region flux rescale, which reflects vortices back into the domain - " +
     "adequate for the steady cases validated here, and a real limitation for " +
     "unsteady wakes. A convective outflow was deferred rather than adopted, " +
-    "because changing it would perturb the cylinder benchmark. Obstacle surfaces " +
-    "carry uniform no-slip and are not configurable."
+    "because changing it would perturb the cylinder benchmark."
+  );
+  lines.push("");
+  lines.push(
+    "From `docs/M5-interactive-geometry.md`: drawn shapes are SAMPLED onto the " +
+    "existing uniform grid - cell centres tested against a region - not meshed, so " +
+    "the staircase limitation above applies to anything drawn as much as to the " +
+    "cylinder. Solid surfaces can now carry the full condition set where they are " +
+    "axis-aligned; on a staircase surface, which has no single normal, only wall " +
+    "and free-slip are allowed and a flux-prescribing condition is refused rather " +
+    "than approximated. A domain whose fluid splits into regions is solved when " +
+    "every region's flux can be absorbed and REJECTED WITH A REASON when it " +
+    "cannot, rather than reported as converged; the pre-M5 solver reported 8.1e-8 " +
+    "for a field whose actual max|div u| was 2.950e-1 in one such case. The outer " +
+    "domain stays a rectangle and per-region pressure solving is deferred."
   );
   lines.push("");
   const unverified = Object.values(REFERENCES).filter((r) => r.verification === "unverified");
