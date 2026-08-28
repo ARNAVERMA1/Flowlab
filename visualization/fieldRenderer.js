@@ -35,7 +35,12 @@ export class FieldRenderer {
   // than over its outermost cells because those cells hold the boundary layer,
   // which is the part of the picture the boundary condition is most
   // responsible for - covering it to label it would be a poor trade.
-  render(grid, view, inset = 0) {
+  // `tint` optionally returns [r, g, b, alpha] for a cell, blended over
+  // whatever the view painted there. It exists so a drawing preview or a
+  // region overlay costs one extra branch inside the loop that already runs,
+  // rather than a second pass of per-cell rectangles over the display canvas -
+  // which at a few thousand cells is the difference between free and visible.
+  render(grid, view, inset = 0, tint = null) {
     const { nx, ny } = grid;
 
     if (this.buffer.width !== nx || this.buffer.height !== ny) {
@@ -62,6 +67,17 @@ export class FieldRenderer {
           colour = NON_FINITE_COLOUR;
         } else {
           colour = view.ramp(view.normalise(view.valueAt(i, j)));
+        }
+        if (tint !== null) {
+          const over = tint(i, j);
+          if (over !== null && over !== undefined) {
+            const a = over[3];
+            colour = [
+              Math.round(colour[0] * (1 - a) + over[0] * a),
+              Math.round(colour[1] * (1 - a) + over[1] * a),
+              Math.round(colour[2] * (1 - a) + over[2] * a),
+            ];
+          }
         }
         data[offset] = colour[0];
         data[offset + 1] = colour[1];

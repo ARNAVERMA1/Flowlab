@@ -17,13 +17,23 @@
 // `Lx - w` are evaluated once by the caller and the same double reaches both
 // the old predicate and the new document.
 
+// `label` is optional and carries no meaning to the sampler - sampleDocument
+// reads `op` and `region` and nothing else, so labelling a scenario's shapes
+// cannot move a cell. It exists so the shape list in the UI can say "cylinder"
+// rather than "any of 3", which is what a scenario's analytic region honestly
+// summarises to when it is described structurally.
+
 // The cylinder body. Closed, because stampCircle compares squared distance
 // with `<=` and the three cell centres that land exactly on the radius belong
 // inside the body - which is what Test 5's wake length was benchmarked with.
 export function cylinderDocument({ cx, cy, radius }) {
   return {
     operations: [
-      { op: "add", region: { kind: "disk", cx, cy, radius, metric: "squared", closed: true } },
+      {
+        op: "add",
+        label: "cylinder",
+        region: { kind: "disk", cx, cy, radius, metric: "squared", closed: true },
+      },
     ],
   };
 }
@@ -47,6 +57,7 @@ export function bendDocument({ Lx, Ly, w, innerRadius }) {
       operations: [
         {
           op: "add",
+          label: "mitre corner block",
           region: {
             all: [
               { kind: "halfPlane", axis: "x", comparison: "<", at: Lx - w },
@@ -72,6 +83,7 @@ export function bendDocument({ Lx, Ly, w, innerRadius }) {
     operations: [
       {
         op: "add",
+        label: "duct walls",
         region: {
           any: [
             // In the corner quadrant: everything outside the duct annulus.

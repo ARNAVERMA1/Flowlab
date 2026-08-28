@@ -4,7 +4,7 @@
 
 Every number below was measured by running the solver through the same harnesses the test suite uses (`validation/measure.js`), and compared against references declared in `validation/registry.js`. A hand-maintained validation record can drift from the code while still reading as authority, which is the one failure mode a document like this must not have.
 
-Generated 2026-08-27 06:57:18 UTC.
+Generated 2026-08-28 18:46:22 UTC.
 
 ## How to read this
 

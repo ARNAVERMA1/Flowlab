@@ -19,6 +19,14 @@
 //      panel says so plainly. It never falls back to the registry's
 //      classification alone, because a classification without measurements
 //      behind it is the badge this is meant to replace.
+//
+// M5 adds a third case, and it is the sharpest one. Once geometry can be drawn,
+// the domain on screen need not be the domain anything was measured on - and a
+// recorded wake length shown beside a cylinder the viewer has just erased is
+// the exact failure this panel exists to prevent, wearing the panel's own
+// clothes. So when the mask no longer matches the scenario's own, the
+// measurements are WITHDRAWN rather than annotated. A caveat under a table of
+// numbers is read after the numbers; removing them is read first.
 
 import { validationForScenario } from "../validation/registry.js";
 import { exponential, fixed } from "./format.js";
@@ -53,7 +61,9 @@ export class ValidationPanel {
     }
   }
 
-  render(scenarioId) {
+  // `geometryEdited` comes from the session's comparison of the sampled mask
+  // against the scenario's own, not from an edit counter.
+  render(scenarioId, { geometryEdited = false } = {}) {
     const info = validationForScenario(scenarioId);
     const set = (id, text, cls) => {
       const node = this.root.querySelector(id);
@@ -61,6 +71,24 @@ export class ValidationPanel {
       node.textContent = text;
       node.className = cls ?? "";
     };
+
+    if (geometryEdited) {
+      set("#vclass", "does not apply", "bad");
+      set("#vmeans", "the domain on screen is not the one that was validated");
+      set("#vref", "—");
+      set("#vrefstatus", "—");
+      const withdrawn = this.root.querySelector("#vdetail");
+      withdrawn.innerHTML = "";
+      withdrawn.className = "vnote bad";
+      withdrawn.textContent =
+        `The geometry has been edited, so the recorded measurements for ` +
+        `"${scenarioId}" describe a different domain and are not shown. The solver ` +
+        `is the same solver and its own invariants - divergence, flux balance, ` +
+        `finiteness - still hold and are still reported above. What is gone is the ` +
+        `comparison against a reference, because there is no reference for a shape ` +
+        `you just drew. Undo back to the scenario's own geometry to get it back.`;
+      return;
+    }
 
     const tone =
       info.classification === "benchmarked" ? "good"
@@ -84,6 +112,7 @@ export class ValidationPanel {
 
     const detail = this.root.querySelector("#vdetail");
     detail.innerHTML = "";
+    detail.className = "";
 
     if (!this.loaded) {
       detail.textContent = "loading validation record…";

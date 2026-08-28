@@ -50,6 +50,7 @@
 // press the edit button".
 
 import { GeometryEditor } from "../geometry/editor.js";
+import { sampleDocument } from "../geometry/document.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
 import { tracerConfigFor } from "../tracer/seeds.js";
 import { step } from "../solver/ns2d.js";
@@ -67,6 +68,9 @@ export class SimulationSession {
   constructor(scenarioId) {
     this.scenarioId = scenarioId;
     const scenario = buildScenario(scenarioId);
+    // The scenario's own geometry, kept so the session can say whether the
+    // domain on screen is still the one anything was validated against.
+    this.pristineGeometry = scenario.geometry;
     this.editor = new GeometryEditor(scenario.geometry);
     this.reset();
   }
@@ -103,7 +107,26 @@ export class SimulationSession {
     // The field is now consistent with this mask, and with nothing else.
     this.maskVersionAtReset = this.scenario.grid.maskVersion;
     this.geometryRevisionAtReset = this.editor.revision;
+    this.geometryMatchesScenario = this.#sameDomainAsScenario();
     return this;
+  }
+
+  // Whether the domain is still the scenario's own.
+  //
+  // Asked of the sampled MASK, not of the edit count or of the document. Those
+  // are proxies and both are wrong in an ordinary case: a document edited and
+  // undone back has a nonzero revision and an identical domain, and two
+  // different documents can sample to the same cells. The mask is what the
+  // solver reads and what a validation record describes, so the mask is what
+  // gets compared.
+  #sameDomainAsScenario() {
+    const pristine = sampleDocument(this.pristineGeometry, this.scenario.grid);
+    const current = this.scenario.grid.solid;
+    if (pristine.length !== current.length) return false;
+    for (let k = 0; k < pristine.length; k++) {
+      if (pristine[k] !== current[k]) return false;
+    }
+    return true;
   }
 
   // True when the mask has moved since the field was built. Asked of the grid
@@ -165,7 +188,8 @@ export class SimulationSession {
   // no meaning in another of a different size and shape.
   load(scenarioId) {
     this.scenarioId = scenarioId;
-    this.editor = new GeometryEditor(buildScenario(scenarioId).geometry);
+    this.pristineGeometry = buildScenario(scenarioId).geometry;
+    this.editor = new GeometryEditor(this.pristineGeometry);
     return this.reset();
   }
 }

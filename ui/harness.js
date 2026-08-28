@@ -22,8 +22,17 @@
 // a field. The dye is advected by the flow and feeds nothing back into it;
 // see tracer/passiveScalar.js for how that separation is enforced and
 // tests/test9_m3_visualization.js for the assertion that it holds.
+//
+// M5 adds drawing, which is NOT a display change: it replaces the domain. The
+// harness owns none of the rules for that - the session does, and it stops the
+// run and rebuilds the field. What the harness owns is everything downstream
+// of the mask, which is re-derived through syncScenario() on every edit. The
+// boundary plan above all: surface conditions attach to solid faces, and after
+// an edit those faces are somewhere else.
 
-import { computeDivergence, boundaryPlanFor, SolverDivergenceError } from "../solver/ns2d.js";
+import {
+  computeDivergence, boundaryPlanFor, SolverDivergenceError, SolverGeometryError,
+} from "../solver/ns2d.js";
 import { SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { FieldRenderer } from "../visualization/fieldRenderer.js";
@@ -32,6 +41,8 @@ import {
   drawBoundaryOverlay, boundaryLegend, measureBoundaryFlux,
 } from "../visualization/boundaryOverlay.js";
 import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
+import { fluidRegions } from "../geometry/regions.js";
+import { DRAW_TOOLS, DrawingController, describeOperation, regionTint } from "./drawing.js";
 import {
   prepareView,
   FIELD_SOURCES,
@@ -66,14 +77,25 @@ export class Harness {
     this.state = "paused"; // paused | running | failed
     this.session = null;
     this.failure = null;
+    this.failureKind = null;
     this.frame = null;
+    // What the pointer is currently drawing, and what the last completed edit
+    // had to say. Both are display state only; the document lives in the
+    // session's editor.
+    this.previewSummary = null;
+    this.editMessage = null;
+    this.showRegions = true;
+    this.drawing = new DrawingController({
+      getLayout: () => this.layout(),
+      onCommit: (operation) => this.commitEdit(() => this.session.applyEdit(operation)),
+    });
 
     this.validation = new ValidationPanel(root);
     this.bindControls();
     this.load(this.scenarioId);
     // The validation record is fetched asynchronously; re-render once it lands
     // so the panel stops saying "loading" and starts showing measurements.
-    this.validation.load().then(() => this.validation.render(this.scenarioId));
+    this.validation.load().then(() => this.renderValidation());
   }
 
   // Read-through to the session, which owns this state. The harness keeps no
@@ -116,6 +138,132 @@ export class Harness {
     }
     mode.value = this.mode;
     mode.addEventListener("change", () => this.setMode(mode.value));
+
+    this.bindDrawingControls();
+  }
+
+  bindDrawingControls() {
+    const { root } = this;
+    const tools = root.querySelector("#tools");
+    for (const [id, tool] of Object.entries(DRAW_TOOLS)) {
+      const button = document.createElement("button");
+      button.className = "tool";
+      button.dataset.tool = id;
+      button.textContent = tool.label;
+      button.addEventListener("click", () => this.setTool(id));
+      tools.appendChild(button);
+    }
+
+    root.querySelector("#undo").addEventListener("click", () =>
+      this.commitEdit(() => this.session.undo()));
+    root.querySelector("#redo").addEventListener("click", () =>
+      this.commitEdit(() => this.session.redo()));
+    root.querySelector("#clearshapes").addEventListener("click", () =>
+      this.commitEdit(() => this.session.clearGeometry()));
+
+    const regions = root.querySelector("#showregions");
+    regions.checked = this.showRegions;
+    regions.addEventListener("change", () => {
+      this.showRegions = regions.checked;
+      this.draw();
+    });
+
+    // Pointer rather than mouse events, so a stylus or a touch drag works and
+    // so capture is available: a drag that leaves the canvas keeps reporting,
+    // and clampToDomain decides what that means rather than the gesture simply
+    // stopping wherever the pointer crossed the edge.
+    const canvas = root.querySelector("#field");
+    canvas.addEventListener("pointerdown", (event) => {
+      if (!this.drawing.down(event.clientX, event.clientY)) return;
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      this.draw();
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      if (this.drawing.move(event.clientX, event.clientY)) this.draw();
+    });
+    canvas.addEventListener("pointerup", (event) => {
+      if (this.drawing.anchor === null) return;
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      // up() commits through onCommit, which redraws. It returns false for a
+      // gesture too small to make a shape, which still has to clear the
+      // preview off the canvas.
+      if (!this.drawing.up()) this.draw();
+    });
+    canvas.addEventListener("pointercancel", () => {
+      if (this.drawing.cancel()) this.draw();
+    });
+    // Escape abandons a drag. The gesture is not the document, so nothing
+    // reaches the undo stack and there is nothing to undo afterwards.
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.drawing.cancel()) this.draw();
+    });
+  }
+
+  // The numbers canvasMapping needs to turn a pointer position into a place in
+  // the fluid. Read fresh every time: the canvas is displayed with max-width,
+  // so its box changes with the window and a cached rect would put shapes
+  // somewhere other than where they were drawn.
+  layout() {
+    const canvas = this.root.querySelector("#field");
+    const { grid } = this.scenario;
+    return {
+      rect: canvas.getBoundingClientRect(),
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      margin: MARGIN,
+      scale: this.scale,
+      h: grid.h,
+      nx: grid.nx,
+      ny: grid.ny,
+    };
+  }
+
+  setTool(id) {
+    if (!this.drawing.setTool(id)) return;
+    this.root.querySelector("#field").classList.toggle("drawing", DRAW_TOOLS[id].makes !== null);
+    this.draw();
+  }
+
+  // A geometry edit. The session stops the run and rebuilds the field from the
+  // scenario's initial condition; the harness re-derives everything downstream
+  // of the mask.
+  //
+  // A failure is cleared here for the same reason Reset clears it: the field
+  // being shown was replaced, not repaired, so there is no broken state left
+  // to protect anyone from. What would be wrong is clearing it while keeping
+  // the field, and that is not a thing this path can do.
+  commitEdit(apply) {
+    if (!this.session) return false;
+    this.editMessage = null;
+    let changed;
+    try {
+      changed = apply();
+    } catch (error) {
+      // An edit the document model rejects leaves the editor untouched, so the
+      // right response is to say why and carry on rather than to halt.
+      this.editMessage = `edit rejected: ${error.message}`;
+      this.draw();
+      return false;
+    }
+    if (!changed) return false;
+    this.stopLoop();
+    this.state = "paused";
+    this.failure = null;
+    this.failureKind = null;
+    this.syncScenario();
+    this.renderValidation();
+    this.draw();
+    return true;
+  }
+
+  // The panel is told whether the domain is still the scenario's own, so a
+  // recorded wake length is never shown beside a cylinder that has been
+  // erased. The session decides that by comparing masks; see ui/session.js.
+  renderValidation() {
+    this.validation.render(this.scenarioId, {
+      geometryEdited: !this.session.geometryMatchesScenario,
+    });
   }
 
   // A pure display change. No step, no reset, no field is touched - which is
@@ -142,13 +290,27 @@ export class Harness {
     if (this.session) this.session.load(id);
     else this.session = new SimulationSession(id);
     this.failure = null;
+    this.failureKind = null;
     this.state = "paused";
+    this.editMessage = null;
+    this.drawing.cancel();
 
+    this.syncScenario();
+    this.root.querySelector("#note").textContent = this.scenario.note;
+    this.renderValidation();
+    this.draw();
+  }
+
+  // Everything the harness derives from the current scenario object. Called on
+  // load and again on every geometry edit, because an edit REPLACES the
+  // scenario - the session rebuilds it rather than patching the field - so a
+  // plan compiled before the edit describes a domain that no longer exists.
+  syncScenario() {
     const { grid } = this.scenario;
-    // Compiled once per load and handed to both the solver and the overlay, so
-    // the picture of what is applied where cannot disagree with what is
-    // applied. Compiling separately for the display would be two
-    // implementations of one rule.
+    // Compiled once and handed to both the solver and the overlay, so the
+    // picture of what is applied where cannot disagree with what is applied.
+    // Compiling separately for the display would be two implementations of one
+    // rule.
     this.plan = boundaryPlanFor(grid, this.scenario.bc);
     this.tracerConfig = this.session.tracerConfig;
 
@@ -165,10 +327,6 @@ export class Harness {
     this.scale = scale;
     canvas.width = grid.nx * scale + 2 * MARGIN;
     canvas.height = grid.ny * scale + 2 * MARGIN;
-
-    this.root.querySelector("#note").textContent = this.scenario.note;
-    this.validation.render(id);
-    this.draw();
   }
 
   // Dye controls only ever touch the tracer. They do not reset the run: the
@@ -215,17 +373,29 @@ export class Harness {
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
-      // Both solver failure modes are hard stops here: the scheme coming apart
-      // (stability) and the projection failing to deliver the incompressibility
-      // it promised (divergence).
+      // Three solver failure modes are hard stops here: the scheme coming apart
+      // (stability), the projection failing to deliver the incompressibility it
+      // promised (divergence), and the domain the geometry describes not being
+      // solvable at all.
+      //
+      // The last one only became reachable when drawing arrived. Before M5 the
+      // geometries were fixed and valid, so a rejected domain could not happen
+      // from the UI; now the most natural experiment there is - draw a wall
+      // across the channel - produces exactly that, and it must land in the
+      // panel rather than as an uncaught exception inside a frame callback.
       const isSolverFailure =
         error instanceof SolverStabilityError ||
         error instanceof SolverDivergenceError ||
+        error instanceof SolverGeometryError ||
         error instanceof StaleFieldError;
       if (!isSolverFailure) throw error;
       this.state = "failed";
       this.stopLoop();
       this.failure = error.message;
+      // A rejected geometry is not a broken field. The field is still the
+      // initial condition, unmodified - the solver refused before touching it -
+      // so the banner must not tell anyone the numbers below are wreckage.
+      this.failureKind = error instanceof SolverGeometryError ? "geometry" : "field";
       this.draw();
       return;
     }
@@ -245,10 +415,19 @@ export class Harness {
       this.state = "failed";
       this.stopLoop();
       this.failure = health.message;
+      this.failureKind = "field";
     }
 
     const view = prepareView(this.mode, { grid, tracer: this.tracer });
-    this.renderer.render(grid, view, MARGIN);
+    // The preview and the region overlay are drawn through the renderer's tint
+    // hook, inside the loop that already visits every cell, and the count of
+    // affected cells is taken from that same pass. Counting separately would be
+    // a second implementation of "which cells does this shape cover", free to
+    // disagree with the one the user is looking at.
+    const pending = this.drawing.pending;
+    const counter = { changing: 0 };
+    this.renderer.render(grid, view, MARGIN, this.composeTint(grid, counter));
+    this.previewSummary = pending === null ? null : { operation: pending, changing: counter.changing };
     drawBoundaryOverlay(this.renderer.context, this.plan, {
       originX: MARGIN,
       originY: MARGIN,
@@ -305,7 +484,11 @@ export class Harness {
     const banner = root.querySelector("#banner");
     if (this.state === "failed") {
       banner.hidden = false;
-      banner.textContent = `SIMULATION DIVERGED - ${this.failure}. Numbers below are from the broken field. Press Reset.`;
+      banner.textContent = this.failureKind === "geometry"
+        ? `GEOMETRY REJECTED - ${this.failure} The field below is the initial ` +
+          `condition, untouched: no step was taken. Change the geometry or the ` +
+          `boundary conditions and it will run.`
+        : `SIMULATION DIVERGED - ${this.failure}. Numbers below are from the broken field. Press Reset.`;
     } else {
       banner.hidden = true;
     }
@@ -316,7 +499,90 @@ export class Harness {
 
     this.updateTracerReadouts();
     this.updateBoundaryPanel();
+    this.updateGeometryPanel();
     this.updateLegend(view);
+  }
+
+  // What gets blended over the field. A drag in progress wins over the region
+  // overlay: while a shape is being pulled out, the cells it will change are
+  // the only thing worth showing, and two tints at once would be unreadable.
+  //
+  // The preview colours cells the SHAPE covers; the counter records only the
+  // ones that would actually change state, since a circle drawn over an
+  // existing wall covers plenty of cells and changes none of them.
+  composeTint(grid, counter) {
+    const preview = this.drawing.tintFor(grid);
+    if (preview !== null) {
+      const adding = this.drawing.pending.op === "add";
+      return (i, j) => {
+        const colour = preview(i, j);
+        if (colour !== null && (grid.solid[grid.idx(i, j)] !== 0) !== adding) counter.changing++;
+        return colour;
+      };
+    }
+    if (!this.showRegions) return null;
+    // Drawn from the same labelling the solver reads, not a second computation
+    // of connectivity - the same rule the M4 bands follow.
+    return regionTint(grid, fluidRegions(grid));
+  }
+
+  // The geometry panel: which tool is armed, what the pending gesture would
+  // do, and the document as a list you can remove entries from.
+  updateGeometryPanel() {
+    const { root, session } = this;
+    const set = (id, text, bad = false) => {
+      const node = root.querySelector(id);
+      node.textContent = text;
+      node.classList.toggle("bad", bad);
+    };
+
+    for (const button of root.querySelectorAll("#tools .tool")) {
+      button.classList.toggle("on", button.dataset.tool === this.drawing.tool);
+    }
+
+    set("#geomtool", DRAW_TOOLS[this.drawing.tool].label);
+    const count = session.editor.size;
+    set("#geomcount", count === 0 ? "none" : integer(count));
+
+    const preview = this.previewSummary;
+    if (this.editMessage !== null) {
+      set("#geompreview", this.editMessage, true);
+    } else if (preview === null) {
+      set("#geompreview", this.drawing.tool === "select" ? "pick a tool to draw" : "-");
+    } else {
+      const becomes = preview.operation.op === "add" ? "become solid" : "become fluid";
+      set("#geompreview", `${integer(preview.changing)} cells ${becomes}`);
+    }
+
+    root.querySelector("#undo").disabled = !session.canUndo;
+    root.querySelector("#redo").disabled = !session.canRedo;
+    root.querySelector("#clearshapes").disabled = count === 0;
+
+    const list = root.querySelector("#geomlist");
+    const signature = `${this.scenarioId}:${session.editor.revision}`;
+    if (list.dataset.builtFor === signature) return;
+    list.innerHTML = "";
+    session.document.operations.forEach((operation, index) => {
+      const row = document.createElement("div");
+      row.className = "geomrow";
+      const label = document.createElement("span");
+      label.className = "gindex";
+      label.textContent = String(index + 1);
+      const text = document.createElement("span");
+      text.className = "gtext";
+      text.textContent = describeOperation(operation);
+      const drop = document.createElement("button");
+      drop.className = "gdrop";
+      drop.textContent = "remove";
+      drop.title = "Remove this shape";
+      // Removing a scenario's own shape is allowed and is the point: deleting
+      // the cylinder from the cylinder scenario is a legitimate edit, and the
+      // solver is told about it the same way any drawn shape is.
+      drop.addEventListener("click", () => this.commitEdit(() => session.removeEdit(index)));
+      row.append(label, text, drop);
+      list.appendChild(row);
+    });
+    list.dataset.builtFor = signature;
   }
 
   updateTracerReadouts() {
@@ -350,7 +616,10 @@ export class Harness {
   // where nothing was specified and the flux is the answer.
   updateBoundaryPanel() {
     const list = this.root.querySelector("#bclist");
-    const signature = this.scenarioId;
+    // Keyed on the geometry revision as well as the scenario: surface
+    // conditions attach to solid faces, so an edit can change what the legend
+    // should say without the scenario changing at all.
+    const signature = `${this.scenarioId}:${this.session.editor.revision}`;
     if (list.dataset.builtFor !== signature) {
       list.innerHTML = "";
       for (const entry of boundaryLegend(this.plan)) {
