@@ -118,8 +118,47 @@ export function measureBoundaryFlux(grid, plan) {
     }
     result[side] = { flux: nonFinite > 0 ? NaN : flux, nonFiniteCells: nonFinite };
   }
-  const total = SIDES.reduce((sum, side) => sum + result[side].flux, 0);
-  result.net = total;
+  // Drawn surfaces carry flux too, and leaving them out makes the net a lie in
+  // exactly the direction that looks reassuring. Measured before this was
+  // added: a channel with a 0.3 surface inlet reported a net of -0.300 for a
+  // field whose actual divergence was 7e-8 - perfectly balanced, displayed as
+  // leaking. Same shape as the three flux-balance bugs: a conservation figure
+  // counting one kind of contribution.
+  let surfaceFlux = 0;
+  let surfaceNonFinite = 0;
+  if (plan.surfaces !== null) {
+    const visit = (table, arr, k, solidSide) => {
+      if (table[k] < 0) return;
+      const value = (solidSide ? 1 : -1) * arr[k];
+      if (!Number.isFinite(value)) {
+        surfaceNonFinite++;
+        return;
+      }
+      surfaceFlux += value * h;
+    };
+    for (let j = 1; j <= ny; j++) {
+      for (let i = 0; i <= nx; i++) {
+        const k = grid.idx(i, j);
+        const a = solid[k];
+        if (a === solid[grid.idx(i + 1, j)]) continue;
+        visit(plan.surfaces.u, u, k, a);
+      }
+    }
+    for (let i = 1; i <= nx; i++) {
+      for (let j = 0; j <= ny; j++) {
+        const k = grid.idx(i, j);
+        const a = solid[k];
+        if (a === solid[grid.idx(i, j + 1)]) continue;
+        visit(plan.surfaces.v, v, k, a);
+      }
+    }
+  }
+  result.surfaces = {
+    flux: surfaceNonFinite > 0 ? NaN : surfaceFlux,
+    nonFiniteCells: surfaceNonFinite,
+  };
+
+  result.net = SIDES.reduce((sum, side) => sum + result[side].flux, 0) + result.surfaces.flux;
   return result;
 }
 

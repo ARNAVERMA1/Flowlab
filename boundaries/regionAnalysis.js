@@ -44,6 +44,38 @@ export function analyseRegions(grid, plan) {
     visit(plan.faces.top, i, grid.idx(i, grid.ny));
   }
 
+  // Conditions attached to drawn surfaces count too. Without this a cavity
+  // whose only opening is a pressure boundary on an interior surface was
+  // reported as "sealed - nothing enters or leaves", which is the same shape
+  // of mistake as a flux sum that counts one kind of face.
+  if (plan.surfaces !== null) {
+    const visitSurface = (table, faceIndex, fluidCell) => {
+      const index = table[faceIndex];
+      if (index < 0) return;
+      const region = label[fluidCell];
+      if (region < 0) return;
+      const condition = plan.surfaces.conditions[index];
+      regions[region].families.add(BOUNDARY_TYPES[condition.type]?.family ?? "unknown");
+      regions[region].boundaryFaces++;
+    };
+    for (let j = 1; j <= grid.ny; j++) {
+      for (let i = 0; i <= grid.nx; i++) {
+        const k = grid.idx(i, j);
+        const a = grid.solid[k];
+        if (a === grid.solid[grid.idx(i + 1, j)]) continue;
+        visitSurface(plan.surfaces.u, k, a ? grid.idx(i + 1, j) : k);
+      }
+    }
+    for (let i = 1; i <= grid.nx; i++) {
+      for (let j = 0; j <= grid.ny; j++) {
+        const k = grid.idx(i, j);
+        const a = grid.solid[k];
+        if (a === grid.solid[grid.idx(i, j + 1)]) continue;
+        visitSurface(plan.surfaces.v, k, a ? grid.idx(i, j + 1) : k);
+      }
+    }
+  }
+
   for (const region of regions) {
     const families = region.families;
     region.hasInlet = families.has("inlet");

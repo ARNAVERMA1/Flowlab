@@ -44,9 +44,6 @@ import { compileBoundaryConditions, planMatchesGrid } from "../boundaries/compil
 import { fluidRegions } from "../geometry/regions.js";
 import { assertTimestepIsStable, peakCellSpeed, SolverStabilityError } from "./stability.js";
 
-// Raised when the projection cannot deliver the incompressibility it was asked
-// for. Distinct from SolverStabilityError: that one is about the scheme coming
-// apart, this one is about the continuity constraint not being met.
 // A geometry the solver cannot satisfy, as opposed to one it merely finds
 // hard. Separate from SolverDivergenceError because the remedy is different:
 // a divergence failure asks for more iterations or a looser bound, while this
@@ -59,6 +56,9 @@ export class SolverGeometryError extends Error {
   }
 }
 
+// Raised when the projection cannot deliver the incompressibility it was asked
+// for. Distinct from SolverStabilityError: that one is about the scheme coming
+// apart, this one is about the continuity constraint not being met.
 export class SolverDivergenceError extends Error {
   constructor(message, detail) {
     super(message);
@@ -533,19 +533,13 @@ function enforceFluxBalance(grid, plan, u, v) {
   // divergence-free by any pressure field. Reported rather than thrown here,
   // so the decision about what is tolerable stays with step(), which knows the
   // divergence bound that was promised.
-  let unbalanced = null;
-  for (let r = 0; r < regionCount; r++) {
-    if (outflowCounts[r] !== 0 || freeBoundary[r] || nets[r] === 0) continue;
-    (unbalanced ??= []).push({
-      region: r,
-      netFlux: nets[r],
-      cellCount: cellCounts[r],
-      // The divergence this imbalance forces, spread over the region. Compared
-      // against the caller's tolerance rather than an invented constant.
-      forcedDivergence: Math.abs(nets[r]) / (cellCounts[r] * h * h),
-    });
-  }
-  return unbalanced;
+  // Whether each region CAN be balanced is no longer judged here. Counting
+  // boundary faces means depending on having enumerated every kind of face
+  // correctly, and that dependency is exactly what failed three times: an
+  // outflow rescale that cancelled itself, a domain whose only openings took
+  // no part in the balance, and a surface inflow left out of it. The question
+  // is asked of the Poisson right-hand side instead, where the inconsistency
+  // lands whatever produced it - see assertRegionsAreSolvable.
 }
 
 // Pressure: zero-gradient (Neumann) at every boundary, domain and obstacle
@@ -643,10 +637,13 @@ function computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G) {
   }
 }
 
-function computeRHS(grid, F, G, dt, rho, rhs, cells) {
+// Also accumulates the right-hand side per connected region, which is how each
+// region's solvability is judged - see assertRegionsAreSolvable.
+function computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums) {
   const { nx, ny, h, solid } = grid;
   const idx = idxFor(grid);
   const { dirichletRHS } = cells;
+  const { label } = fluidRegions(grid);
   const h2 = h * h;
   for (let j = 1; j <= ny; j++) {
     for (let i = 1; i <= nx; i++) {
@@ -655,6 +652,7 @@ function computeRHS(grid, F, G, dt, rho, rhs, cells) {
       const div = (F[k] - F[idx(i - 1, j)]) / h + (G[k] - G[idx(i, j - 1)]) / h;
       // The known 2*p_b/h^2 from each Dirichlet face - see scratchFor.
       rhs[k] = (rho / dt) * div - (dirichletRHS === null ? 0 : dirichletRHS[k] / h2);
+      regionSums[label[k]] += rhs[k];
     }
   }
 }
@@ -957,13 +955,18 @@ function scratchFor(grid, plan) {
   // of applyA byte-for-byte what it was: with no pressure boundary, nothing
   // below executes and nothing downstream can tell the difference.
   let dirichletRHS = null;
+  let dirichletRegions = null;
+  const regionLabel = fluidRegions(grid).label;
+  const regionCount = fluidRegions(grid).count;
   if (plan?.hasPressure) {
     dirichletRHS = new Float64Array(size);
+    dirichletRegions ??= new Uint8Array(regionCount);
     const at = (faceConditions, faceIndex, cell) => {
       const condition = plan.conditions[faceConditions[faceIndex]];
       if (condition.type !== "pressure" || solid[cell]) return;
       counts[cell] += 2;
       dirichletRHS[cell] += 2 * condition.p;
+      dirichletRegions[regionLabel[cell]] = 1;
     };
     for (let j = 1; j <= ny; j++) {
       at(plan.faces.left, j, idx(1, j));
@@ -981,6 +984,7 @@ function scratchFor(grid, plan) {
   // edge - only the geometry differs.
   if (plan?.surfaces?.hasSurfacePressure) {
     dirichletRHS ??= new Float64Array(size);
+    dirichletRegions ??= new Uint8Array(regionCount);
     const { surfaces } = plan;
     const attach = (table, k, fluidCell) => {
       const index = table[k];
@@ -989,6 +993,7 @@ function scratchFor(grid, plan) {
       if (condition.type !== "pressure") return;
       counts[fluidCell] += 2;
       dirichletRHS[fluidCell] += 2 * condition.p;
+      dirichletRegions[regionLabel[fluidCell]] = 1;
     };
     for (let j = 1; j <= ny; j++) {
       for (let i = 0; i <= nx; i++) {
@@ -1019,6 +1024,7 @@ function scratchFor(grid, plan) {
       offsets,
       counts,
       dirichletRHS,
+      dirichletRegions,
       // With a prescribed pressure anywhere the constant null space is gone,
       // and projecting it out would remove a component the boundary condition
       // legitimately fixes.
@@ -1042,6 +1048,59 @@ function scratchFor(grid, plan) {
 // velocity divergence is exactly -(dt/rho) * (Poisson residual), so a
 // residual tolerance of divergenceTol*rho/dt bounds the divergence of the
 // field this step produces.
+// Is each region's pressure problem solvable at all?
+//
+// Measured where the inconsistency actually lands rather than by enumerating
+// boundary faces, and that distinction is the point.
+//
+// Every row of the pure-Neumann operator sums to zero, so sum(A p) = 0 for any
+// p, so sum(residual) === sum(rhs) at every iteration - unchanged, whatever
+// caused it. If that sum is not zero the region has NO solution: no pressure
+// field makes it divergence-free. And the zero-mean projection is precisely
+// what strips that component out of the reported residual, which is why an
+// unsolvable region used to converge to a healthy-looking number while sitting
+// on a field whose divergence was orders of magnitude worse.
+//
+// Three bugs of that shape were found before this existed - an outflow rescale
+// that cancelled itself, a domain whose only openings took no part in the
+// balance, and a surface inflow left out of it. Each was fixed at its own site
+// and each was found by accident. This catches the class rather than the
+// instances: measured on the surface-inflow bug, the figure below was 5.28e-2
+// against an actual divergence of 5.28e-2, while every healthy configuration
+// sits at 1e-17.
+//
+// Regions carrying a prescribed pressure are exempt: their operator is not
+// singular, every right-hand side is solvable, and the row-sum identity this
+// rests on does not hold for them.
+function assertRegionsAreSolvable(cells, regions, regionSums, dt, rho, divergenceTol) {
+  const { dirichletRegions } = cells;
+  const unsolvable = [];
+  for (let r = 0; r < regions.count; r++) {
+    if (dirichletRegions !== null && dirichletRegions !== undefined && dirichletRegions[r]) continue;
+    const cellCount = regions.cellCounts[r];
+    if (cellCount === 0) continue;
+    // The divergence this inconsistency forces, spread over the region.
+    // Compared against the caller's own bound rather than an invented constant.
+    const forcedDivergence = (Math.abs(regionSums[r]) * dt) / (rho * cellCount);
+    if (forcedDivergence > divergenceTol) unsolvable.push({ region: r, cellCount, forcedDivergence });
+  }
+  if (unsolvable.length === 0) return;
+
+  const worst = unsolvable.reduce((a, b) => (a.forcedDivergence > b.forcedDivergence ? a : b));
+  throw new SolverGeometryError(
+    `fluid region ${worst.region} (${worst.cellCount} cells) carries a net flux that nothing ` +
+    `in it can absorb, so no pressure field can make it divergence-free. ` +
+    `${unsolvable.length > 1 ? `${unsolvable.length} regions are in this state. ` : ""}` +
+    `It would force a divergence of ${worst.forcedDivergence.toExponential(2)} against a bound ` +
+    `of ${divergenceTol.toExponential(2)}. This is a geometry and boundary-condition problem ` +
+    `rather than a solver one - most often a wall drawn across the domain separating an inlet ` +
+    `from every outlet, or a domain whose only openings copy their velocity and take no part ` +
+    `in the flux balance. Give the region an outlet or a pressure boundary, or remove the ` +
+    `inflow feeding it.`,
+    { reason: "unsolvable-region", regions: unsolvable }
+  );
+}
+
 export function step(grid, bc, params) {
   const {
     nu,
@@ -1071,37 +1130,13 @@ export function step(grid, bc, params) {
   F.set(grid.u);
   G.set(grid.v);
   computeIntermediateVelocities(grid, nu, dt, fx, fy, F, G);
-  const unbalanced = applyVelocityBoundaryConditions(grid, bc, F, G);
+  applyVelocityBoundaryConditions(grid, bc, F, G);
 
-  // A region that must carry flux and has nowhere to send it is not a hard
-  // problem, it is an impossible one: no pressure field makes it
-  // divergence-free. Rejecting it by name here is the difference between "you
-  // sealed the inlet away from the outlet" and the unexplained divergence
-  // failure this used to surface as.
-  //
-  // The threshold is the caller's own divergence bound rather than an invented
-  // constant: an imbalance too small to breach the promise step() already
-  // makes is not worth refusing a geometry over.
-  if (unbalanced) {
-    const fatal = unbalanced.filter((r) => r.forcedDivergence > divergenceTol);
-    if (fatal.length > 0) {
-      const worst = fatal.reduce((a, b) => (a.forcedDivergence > b.forcedDivergence ? a : b));
-      throw new SolverGeometryError(
-        `fluid region ${worst.region} (${worst.cellCount} cells) carries a net flux of ` +
-        `${worst.netFlux.toExponential(3)} and has no outlet to carry it away. ` +
-        `${fatal.length > 1 ? `${fatal.length} regions are in this state. ` : ""}` +
-        `Nothing can make that region divergence-free: it would force a divergence of ` +
-        `${worst.forcedDivergence.toExponential(2)} against a bound of ` +
-        `${divergenceTol.toExponential(2)}. This is a geometry and boundary-condition ` +
-        `problem rather than a solver one - most often a wall drawn across the domain that ` +
-        `separates an inlet from every outlet. Give the region an outlet or a pressure ` +
-        `boundary, or remove the inflow feeding it.`,
-        { reason: "unbalanced-region", regions: fatal }
-      );
-    }
-  }
 
-  computeRHS(grid, F, G, dt, rho, rhs, cells);
+  const regions = fluidRegions(grid);
+  const regionSums = new Float64Array(regions.count);
+  computeRHS(grid, F, G, dt, rho, rhs, cells, regionSums);
+  assertRegionsAreSolvable(cells, regions, regionSums, dt, rho, divergenceTol);
   const poisson = solvePressurePoisson(grid, rhs, cells, {
     residualTol: (divergenceTol * rho) / dt,
     maxIterations: poissonMaxIterations,

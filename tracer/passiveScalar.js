@@ -305,10 +305,14 @@ export class PassiveTracer {
         const left = face;
         const right = this.idx(i + 1, j);
         const speed = u[face];
-        // A solid on either side means a wall face: no dye crosses it. The
-        // solver already holds u at zero there, but relying on that would make
-        // this correct only by coincidence.
-        if (speed === 0 || solid[left] || solid[right]) {
+        // A face with solid on BOTH sides is inside the body and carries
+        // nothing. A face with solid on one side is a surface, and since M5 it
+        // can carry real flux - a drawn outlet or inlet. Skipping those by the
+        // presence of solid rather than by the absence of flow meant dye could
+        // not leave through a drawn outlet: measured at 70.4% accumulation over
+        // 400 steps in a channel whose only outlet was a surface. A wall face
+        // still carries exactly zero, so `speed === 0` skips it first.
+        if (speed === 0 || (solid[left] && solid[right])) {
           fx[face] = 0;
           continue;
         }
@@ -338,7 +342,7 @@ export class PassiveTracer {
         const below = face;
         const above = this.idx(i, j + 1);
         const speed = v[face];
-        if (speed === 0 || solid[below] || solid[above]) {
+        if (speed === 0 || (solid[below] && solid[above])) {
           fy[face] = 0;
           continue;
         }

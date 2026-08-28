@@ -30,6 +30,8 @@ import { fluidRegions } from "../geometry/regions.js";
 import { step, computeDivergence, boundaryPlanFor } from "../solver/ns2d.js";
 import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js";
 import { compileBoundaryConditions } from "../boundaries/compile.js";
+import { measureBoundaryFlux } from "../visualization/boundaryOverlay.js";
+import { PassiveTracer } from "../tracer/passiveScalar.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
@@ -744,15 +746,15 @@ test("M5 - a region with an inlet and no outlet is rejected by name", () => {
   });
   assert.ok(error, "expected a rejection");
   assert.equal(error.name, "SolverGeometryError", `threw ${error.name} instead`);
-  assert.equal(error.reason, "unbalanced-region");
-  assert.match(error.message, /no outlet to carry it away/);
+  assert.equal(error.reason, "unsolvable-region");
+  assert.match(error.message, /nothing in it can absorb/);
   assert.match(error.message, /geometry and boundary-condition problem/);
   assert.equal(error.regions.length, 1, "exactly one region should be unsatisfiable");
   assert.ok(error.regions[0].forcedDivergence > params.divergenceTol);
   console.log(
-    `[M5 regions] sealed-off inlet rejected: region ${error.regions[0].region}, ` +
-    `net flux ${error.regions[0].netFlux.toExponential(3)}, ` +
-    `forced divergence ${error.regions[0].forcedDivergence.toExponential(2)}`
+    `[M5 regions] sealed-off inlet rejected: region ${error.regions[0].region} ` +
+    `(${error.regions[0].cellCount} cells), forced divergence ` +
+    `${error.regions[0].forcedDivergence.toExponential(2)}`
   );
 });
 
@@ -871,7 +873,7 @@ test("M5 - an all-zeroGradient domain is rejected rather than reported healthy",
   });
   assert.ok(error, "expected a rejection rather than a healthy-looking divergence");
   assert.equal(error.name, "SolverGeometryError");
-  assert.equal(error.reason, "unbalanced-region");
+  assert.equal(error.reason, "unsolvable-region");
   console.log(
     `[M5 regions] all-zeroGradient domain rejected: forced divergence ` +
     `${error.regions[0].forcedDivergence.toExponential(2)} (was reported as 9.889e-8 converged)`
@@ -1128,5 +1130,149 @@ test("M5 - a moving surface drags the fluid along with it", () => {
   console.log(
     `[M5 surfaces] surface moving at u = 1 dragged the fluid above it to ${moving.toFixed(4)} ` +
     `(stationary: ${still.toExponential(1)})`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The deliberate hunt: reductions that count one kind of contribution
+// ---------------------------------------------------------------------------
+//
+// After three bugs of the same shape - unbalanced flux hiding in the
+// null-space component of the residual, reported as healthy - the codebase was
+// searched for the pattern rather than waiting to trip over a fourth. The
+// pattern: a sum, integral or conservation check whose filter drops
+// contributions that belong in it.
+//
+// Three more were found, all exposed by step 4 giving drawn surfaces the
+// ability to carry flux. Each is pinned below.
+
+test("M5 hunt - the boundary flux readout counts drawn surfaces", () => {
+  // Found: measureBoundaryFlux summed the four domain sides only. With a 0.3
+  // surface inlet it reported a net of -0.300 for a field whose divergence was
+  // 7e-8 - perfectly balanced, displayed as leaking.
+  const { grid, params } = channelWithBlock();
+  const bc = {
+    ...CHANNEL_BC,
+    surfaces: [{ where: upstreamFace, type: "flowInlet", flowRate: -0.3 }],
+  };
+  const plan = boundaryPlanFor(grid, bc);
+  for (let n = 0; n < 300; n++) step(grid, bc, params);
+
+  const flux = measureBoundaryFlux(grid, plan);
+  assert.ok(
+    Math.abs(flux.surfaces.flux - 0.3) < 1e-9,
+    `the surface inlet should show 0.3 into the domain, got ${flux.surfaces.flux}`
+  );
+  // The net is the claim that matters: a divergence-free field must balance.
+  assert.ok(Math.abs(flux.net) < 1e-8, `net flux is ${flux.net.toExponential(3)}`);
+  assert.ok(computeDivergence(grid).max < params.divergenceTol);
+  console.log(
+    `[M5 hunt] boundary flux: sides ${(flux.net - flux.surfaces.flux).toExponential(2)}, ` +
+    `surfaces ${flux.surfaces.flux.toFixed(6)}, net ${flux.net.toExponential(2)}`
+  );
+});
+
+test("M5 hunt - region analysis counts conditions on drawn surfaces", () => {
+  // Found: analyseRegions visited domain-edge faces only, so a cavity whose
+  // only opening is a pressure boundary on an interior surface was reported
+  // "sealed - nothing enters or leaves".
+  const h = 1 / 20;
+  const grid = new StaggeredGrid(40, 20, h);
+  applyDocument(grid, {
+    operations: [
+      { op: "add", region: { kind: "rect", x0: 0.4, y0: 0.15, x1: 1.6, y1: 0.85 } },
+      { op: "subtract", region: { kind: "rect", x0: 0.6, y0: 0.3, x1: 1.4, y1: 0.7 } },
+    ],
+  });
+  const bc = {
+    left: { type: "wall" }, right: { type: "wall" },
+    top: { type: "wall" }, bottom: { type: "wall" },
+    surfaces: [{ where: { kind: "rect", x0: 0.59, y0: 0.29, x1: 0.61, y1: 0.71 }, type: "pressure", p: 1 }],
+  };
+  const plan = boundaryPlanFor(grid, bc);
+  const regions = analyseRegions(grid, plan);
+  assert.equal(regions.length, 2, "the frame's interior is its own region");
+
+  const withPressure = regions.filter((r) => r.hasPressure);
+  assert.equal(withPressure.length, 1, "exactly one region has the pressure boundary");
+  assert.equal(withPressure[0].sealed, false, "a region with a pressure boundary is not sealed");
+  assert.equal(regions.filter((r) => r.sealed).length, 1, "the outer region is the sealed one");
+  console.log(`[M5 hunt] region analysis: ${describeRegions(regions)}`);
+});
+
+test("M5 hunt - dye can leave through a drawn outlet", () => {
+  // Found: the tracer skipped any face adjacent to solid, which since step 4
+  // can carry real flux. In a channel whose only outlet was a drawn surface,
+  // fluid left and dye did not - it accumulated 70.4% over 400 steps.
+  const { grid, params } = channelWithBlock();
+  const bc = {
+    left: { type: "inflow", u: 1, v: 0 },
+    right: { type: "wall" },
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+    surfaces: [{ where: downstreamFace, type: "outflow" }],
+  };
+  const tracer = new PassiveTracer(grid);
+  tracer.seed(grid, () => 1);
+  const before = tracer.total(grid).total;
+  for (let n = 0; n < 400; n++) {
+    step(grid, bc, params);
+    tracer.advect(grid, bc, params.dt, { inject: { left: () => 1 } });
+  }
+  const after = tracer.total(grid).total;
+
+  // Dye enters at the inlet and leaves through the drawn outlet, so the total
+  // should sit near its starting value rather than climbing without bound.
+  const growth = after / before - 1;
+  assert.ok(Math.abs(growth) < 0.05, `dye total moved by ${(growth * 100).toFixed(1)}%`);
+
+  // And it must still be bounded and out of the solid.
+  for (let j = 1; j <= grid.ny; j++) {
+    for (let i = 1; i <= grid.nx; i++) {
+      const k = grid.idx(i, j);
+      if (grid.solid[k]) assert.equal(tracer.c[k], 0, `dye inside solid at (${i}, ${j})`);
+      else assert.ok(tracer.c[k] <= 1 + 1e-6 && tracer.c[k] >= -1e-6, `dye out of range: ${tracer.c[k]}`);
+    }
+  }
+  console.log(
+    `[M5 hunt] dye through a drawn outlet: total ${before.toFixed(1)} -> ${after.toFixed(1)} ` +
+    `(${(growth * 100).toFixed(1)}%, was +70.4% before the fix)`
+  );
+});
+
+test("M5 hunt - an unsolvable region is detected from the RHS, not from face bookkeeping", () => {
+  // The general detector. Every row of the pure-Neumann operator sums to zero,
+  // so sum(residual) === sum(rhs) at every iteration: the inconsistency sits in
+  // the right-hand side whatever caused it, and the zero-mean projection is
+  // exactly what hides it from the reported residual.
+  //
+  // This is what makes the check independent of having enumerated boundary
+  // faces correctly - which is the dependency that failed three times.
+  const { grid, params } = splitChannel({});
+  const bc = {
+    left: [
+      { from: 0, to: 0.5, type: "wall" },
+      { from: 0.5, to: 1, type: "inflow", u: 1, v: 0 },
+    ],
+    right: [
+      { from: 0, to: 0.5, type: "outflow" },
+      { from: 0.5, to: 1, type: "wall" },
+    ],
+    top: { type: "wall" },
+    bottom: { type: "wall" },
+  };
+  const error = captureThrow(() => step(grid, bc, params));
+  assert.ok(error, "expected the first step to be refused");
+  assert.equal(error.name, "SolverGeometryError");
+  assert.equal(error.reason, "unsolvable-region");
+
+  // The figure reported is the divergence the inconsistency would force, which
+  // is what makes it comparable against the caller's own bound.
+  const forced = error.regions[0].forcedDivergence;
+  assert.ok(forced > params.divergenceTol);
+  assert.ok(forced > 0.1, `forced divergence ${forced.toExponential(2)} should be large here`);
+  console.log(
+    `[M5 hunt] RHS-derived detector: region ${error.regions[0].region} forces ` +
+    `${forced.toExponential(2)} against a bound of ${params.divergenceTol.toExponential(0)}`
   );
 });
