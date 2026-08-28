@@ -23,10 +23,8 @@
 // see tracer/passiveScalar.js for how that separation is enforced and
 // tests/test9_m3_visualization.js for the assertion that it holds.
 
-import {
-  step, computeDivergence, boundaryPlanFor, SolverDivergenceError,
-} from "../solver/ns2d.js";
-import { computeStableTimestep, SolverStabilityError } from "../solver/stability.js";
+import { computeDivergence, boundaryPlanFor, SolverDivergenceError } from "../solver/ns2d.js";
+import { SolverStabilityError } from "../solver/stability.js";
 import { inspectField } from "../physics/fieldStats.js";
 import { FieldRenderer } from "../visualization/fieldRenderer.js";
 import { samplerCss } from "../visualization/colormap.js";
@@ -39,9 +37,8 @@ import {
   FIELD_SOURCES,
   DEFAULT_FIELD_SOURCE,
 } from "../visualization/fieldSources.js";
-import { buildScenario, SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
-import { PassiveTracer } from "../tracer/passiveScalar.js";
-import { tracerConfigFor } from "../tracer/seeds.js";
+import { SCENARIOS, DEFAULT_SCENARIO } from "../scenarios/index.js";
+import { SimulationSession, StaleFieldError } from "./session.js";
 import { assessField } from "./fieldHealth.js";
 import { ValidationPanel } from "./validationPanel.js";
 import { exponential, fixed, integer, isBad } from "./format.js";
@@ -67,11 +64,7 @@ export class Harness {
     this.mode = DEFAULT_FIELD_SOURCE;
     this.renderer = new FieldRenderer(root.querySelector("#field"));
     this.state = "paused"; // paused | running | failed
-    this.iteration = 0;
-    this.simulatedTime = 0;
-    this.lastStep = null;
-    this.lastTimestep = null;
-    this.lastTracer = null;
+    this.session = null;
     this.failure = null;
     this.frame = null;
 
@@ -82,6 +75,16 @@ export class Harness {
     // so the panel stops saying "loading" and starts showing measurements.
     this.validation.load().then(() => this.validation.render(this.scenarioId));
   }
+
+  // Read-through to the session, which owns this state. The harness keeps no
+  // copy of it.
+  get scenario() { return this.session.scenario; }
+  get tracer() { return this.session.tracer; }
+  get iteration() { return this.session.iteration; }
+  get simulatedTime() { return this.session.simulatedTime; }
+  get lastStep() { return this.session.lastStep; }
+  get lastSelection() { return this.session.lastSelection; }
+  get lastTracer() { return this.session.lastTracer; }
 
   bindControls() {
     const { root } = this;
@@ -132,12 +135,12 @@ export class Harness {
 
   load(id) {
     this.stopLoop();
-    this.scenario = buildScenario(id);
-    this.iteration = 0;
-    this.simulatedTime = 0;
-    this.lastStep = null;
-    this.lastTimestep = null;
-    this.lastTracer = null;
+    // The session owns the scenario, its fields, and the rules for what
+    // happens to them when the geometry changes. The harness drives it and
+    // draws it, rather than keeping a second copy of that state which could
+    // disagree about whether a field is still valid.
+    if (this.session) this.session.load(id);
+    else this.session = new SimulationSession(id);
     this.failure = null;
     this.state = "paused";
 
@@ -147,9 +150,7 @@ export class Harness {
     // applied. Compiling separately for the display would be two
     // implementations of one rule.
     this.plan = boundaryPlanFor(grid, this.scenario.bc);
-    this.tracer = new PassiveTracer(grid);
-    this.tracerConfig = tracerConfigFor(id);
-    this.seedTracer();
+    this.tracerConfig = this.session.tracerConfig;
 
     // Reseed is only meaningful where there is an initial pattern to restore.
     // On an injection-only scenario it would clear the dye and appear to do
@@ -173,17 +174,16 @@ export class Harness {
   // Dye controls only ever touch the tracer. They do not reset the run: the
   // flow keeps whatever state it has and only what is painted into it changes.
   seedTracer() {
-    if (!this.tracer || !this.scenario) return;
-    if (!this.tracerConfig.seeded) return;
+    if (!this.session || !this.tracerConfig.seeded) return;
     this.tracer.clear();
     this.tracer.seed(this.scenario.grid, this.tracerConfig.seed);
-    if (this.scenario) this.draw();
+    this.draw();
   }
 
   clearTracer() {
-    if (!this.tracer) return;
+    if (!this.session) return;
     this.tracer.clear();
-    if (this.scenario) this.draw();
+    this.draw();
   }
 
   run() {
@@ -201,7 +201,6 @@ export class Harness {
 
   tick() {
     if (this.state !== "running") return;
-    const { grid, bc, params, timestep } = this.scenario;
     const started = performance.now();
 
     // The timestep is chosen from the field before every step, not fixed for
@@ -209,22 +208,10 @@ export class Harness {
     // is caught here and turned into the same hard stop as a non-finite field.
     try {
       for (let n = 0; n < STEPS_PER_FRAME; n++) {
-        const selection = computeStableTimestep(grid, {
-          nu: params.nu,
-          safety: timestep.safety,
-          previousTimestep: this.lastTimestep,
-        });
-        this.lastTimestep = selection.dt;
-        this.lastSelection = selection;
-        this.lastStep = step(grid, bc, { ...params, dt: selection.dt });
-        this.iteration++;
-        this.simulatedTime += selection.dt;
-        // The tracer runs after the step, on the velocity field the solver has
-        // just produced, and takes the timestep it is given. It never asks for
-        // a different one - see PassiveTracer.advect.
-        this.lastTracer = this.tracer.advect(grid, bc, selection.dt, {
-          inject: this.tracerConfig.inject,
-        });
+        // One session step: it chooses the timestep from the field, runs the
+        // solver, and advects the tracer on the field the solver just
+        // produced. It refuses outright if the geometry moved underneath it.
+        this.session.advance();
         if (performance.now() - started > FRAME_BUDGET_MS) break;
       }
     } catch (error) {
@@ -232,7 +219,9 @@ export class Harness {
       // (stability) and the projection failing to deliver the incompressibility
       // it promised (divergence).
       const isSolverFailure =
-        error instanceof SolverStabilityError || error instanceof SolverDivergenceError;
+        error instanceof SolverStabilityError ||
+        error instanceof SolverDivergenceError ||
+        error instanceof StaleFieldError;
       if (!isSolverFailure) throw error;
       this.state = "failed";
       this.stopLoop();

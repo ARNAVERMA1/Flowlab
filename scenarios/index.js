@@ -12,7 +12,7 @@
 
 import { StaggeredGrid } from "../geometry/grid.js";
 import { applyDocument } from "../geometry/document.js";
-import { bendDocument, cylinderDocument } from "../geometry/documents.js";
+import { bendDocument, cylinderDocument, emptyDocument } from "../geometry/documents.js";
 
 // Scenarios no longer carry a timestep. The driver calls
 // solver/stability.js computeStableTimestep every step and sizes dt from the
@@ -28,18 +28,21 @@ import { bendDocument, cylinderDocument } from "../geometry/documents.js";
 // 0.4 leaves 1.5x margin below its reproducible boundary.
 const DEFAULT_SAFETY = 0.4;
 
-function lidDrivenCavity() {
+function lidDrivenCavity(override) {
   const n = 64;
   const U = 1;
   const Re = 1000;
   const h = 1 / n;
   const nu = U / Re;
   const grid = new StaggeredGrid(n, n, h);
+  const geometry = override ?? emptyDocument();
+  applyDocument(grid, geometry);
   return {
     id: "cavity",
     label: "Lid-driven cavity (Re 1000)",
     note: "Test 4 - the benchmark gate. Top lid slides right; three no-slip walls.",
     grid,
+    geometry,
     bc: {
       left: { type: "wall" },
       right: { type: "wall" },
@@ -52,7 +55,7 @@ function lidDrivenCavity() {
   };
 }
 
-function cylinderInChannel() {
+function cylinderInChannel(override) {
   const D = 1;
   const cpd = 12;
   const h = D / cpd;
@@ -64,10 +67,17 @@ function cylinderInChannel() {
   const nx = Math.round(14 * cpd);
   const grid = new StaggeredGrid(nx, ny, h);
   const jc = (ny + 1) / 2;
-  applyDocument(
-    grid,
-    cylinderDocument({ cx: (Math.round(3.5 / h + 0.5) - 0.5) * h, cy: (jc - 0.5) * h, radius: D / 2 })
-  );
+  // The override, when given, replaces the scenario's own geometry - and is
+  // applied BEFORE the initial condition is seeded below. Seeding first would
+  // leave cells that the override exposes holding whatever their slots
+  // happened to contain, which is the stale-state hazard the whole restart
+  // rule exists to avoid.
+  const geometry = override ?? cylinderDocument({
+    cx: (Math.round(3.5 / h + 0.5) - 0.5) * h,
+    cy: (jc - 0.5) * h,
+    radius: D / 2,
+  });
+  applyDocument(grid, geometry);
   for (let j = 0; j <= ny + 1; j++) {
     for (let i = 0; i <= nx + 1; i++) {
       if (!grid.solid[grid.idx(i, j)]) grid.u[grid.idx(i, j)] = U;
@@ -78,6 +88,7 @@ function cylinderInChannel() {
     label: "Flow past a cylinder (Re 100)",
     note: "Test 5 - uniform inflow, free-slip channel walls, open outflow.",
     grid,
+    geometry,
     bc: {
       left: { type: "inflow", u: U, v: 0 },
       right: { type: "outflow" },
@@ -90,7 +101,7 @@ function cylinderInChannel() {
   };
 }
 
-function channelBend({ innerRadius, id, label, note, Re = 200 }) {
+function channelBend({ innerRadius, id, label, note, Re = 200 }, override) {
   const w = 1;
   const cpw = 12;
   const legLen = 6;
@@ -103,13 +114,15 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }) {
   const ny = Math.round(Ly / h);
   const grid = new StaggeredGrid(nx, ny, h);
 
-  applyDocument(grid, bendDocument({ Lx, Ly, w, innerRadius }));
+  const geometry = override ?? bendDocument({ Lx, Ly, w, innerRadius });
+  applyDocument(grid, geometry);
 
   return {
     id,
     label,
     note,
     grid,
+    geometry,
     bc: {
       left: { type: "inflow", u: U, v: 0 },
       right: { type: "wall" },
@@ -131,7 +144,7 @@ function channelBend({ innerRadius, id, label, note, Re = 200 }) {
 // the pressure drop, and the steady answer is the one plane Poiseuille
 // predicts. This is the configuration validated in tests/test10 and recorded
 // in the validation registry.
-function pressureChannel() {
+function pressureChannel(override) {
   const w = 1;
   const cpw = 24;
   const L = 6;
@@ -139,6 +152,8 @@ function pressureChannel() {
   const nu = 0.05;
   const dp = 3.6;
   const grid = new StaggeredGrid(Math.round(L / h), cpw, h);
+  const geometry = override ?? emptyDocument();
+  applyDocument(grid, geometry);
   // U_mean = dp*w^2/(12*mu*L), which is 1 for these numbers.
   const U = (dp * w * w) / (12 * nu * L);
   return {
@@ -149,6 +164,7 @@ function pressureChannel() {
       "output, not an input: it settles at the plane Poiseuille value for this " +
       "pressure drop.",
     grid,
+    geometry,
     bc: {
       left: { type: "pressure", p: dp },
       right: { type: "pressure", p: 0 },
@@ -164,7 +180,7 @@ function pressureChannel() {
 // M4 - a segmented boundary: the left wall is mostly solid with a flow-rate
 // inlet across its middle third. There is no way to say this with one condition
 // per side, which is what segments are for.
-function segmentedJet() {
+function segmentedJet(override) {
   const w = 1;
   const cpw = 20;
   const h = w / cpw;
@@ -173,6 +189,8 @@ function segmentedJet() {
   const nu = 0.004;
   const Q = 0.3;
   const grid = new StaggeredGrid(nx, ny, h);
+  const geometry = override ?? emptyDocument();
+  applyDocument(grid, geometry);
   return {
     id: "jet",
     label: "Jet from a segmented inlet",
@@ -181,6 +199,7 @@ function segmentedJet() {
       "its middle third, then wall again. The inlet delivers exactly its stated " +
       "rate through the open part.",
     grid,
+    geometry,
     bc: {
       left: [
         { from: 0, to: w / 3, type: "wall" },
@@ -203,24 +222,24 @@ export const SCENARIOS = [
   {
     id: "bend-sharp",
     label: "Sharp 90 degree bend (Re 200)",
-    build: () =>
+    build: (geometry) =>
       channelBend({
         innerRadius: null,
         id: "bend-sharp",
         label: "Sharp 90 degree bend (Re 200)",
         note: "Test 6 - mitre bend. Separates off the inner corner.",
-      }),
+      }, geometry),
   },
   {
     id: "bend-smooth",
     label: "Smooth 90 degree bend (Re 200)",
-    build: () =>
+    build: (geometry) =>
       channelBend({
         innerRadius: 1,
         id: "bend-smooth",
         label: "Smooth 90 degree bend (Re 200)",
         note: "Test 6 - same duct width, inner corner radiused. Separation suppressed.",
-      }),
+      }, geometry),
   },
   { id: "cylinder", label: "Flow past a cylinder (Re 100)", build: cylinderInChannel },
   { id: "cavity", label: "Lid-driven cavity (Re 1000)", build: lidDrivenCavity },
@@ -230,7 +249,11 @@ export const SCENARIOS = [
 
 export const DEFAULT_SCENARIO = "bend-sharp";
 
-export function buildScenario(id) {
+// `geometry` replaces the scenario's own document when given, which is how a
+// session rebuilds a scenario carrying user edits. Applied before the scenario
+// seeds its initial condition, so cells the edit exposes are seeded like any
+// other fluid cell.
+export function buildScenario(id, geometry) {
   const entry = SCENARIOS.find((s) => s.id === id) ?? SCENARIOS[0];
-  return entry.build();
+  return entry.build(geometry);
 }

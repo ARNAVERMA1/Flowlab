@@ -32,6 +32,8 @@ import { analyseRegions, describeRegions } from "../boundaries/regionAnalysis.js
 import { compileBoundaryConditions } from "../boundaries/compile.js";
 import { measureBoundaryFlux } from "../visualization/boundaryOverlay.js";
 import { PassiveTracer } from "../tracer/passiveScalar.js";
+import { GeometryEditor, TOOLS } from "../geometry/editor.js";
+import { SimulationSession } from "../ui/session.js";
 
 // The cylinder scenario's exact grid and circle placement, copied from
 // scenarios/index.js. Copied rather than imported because the point is to
@@ -1275,4 +1277,178 @@ test("M5 hunt - an unsolvable region is detected from the RHS, not from face boo
     `[M5 hunt] RHS-derived detector: region ${error.regions[0].region} forces ` +
     `${forced.toExponential(2)} against a bound of ${params.divergenceTol.toExponential(0)}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// Step 5 - the editing lifecycle
+// ---------------------------------------------------------------------------
+
+function maskOf(grid) {
+  return Buffer.from(grid.solid.buffer, grid.solid.byteOffset, grid.solid.byteLength).toString("hex");
+}
+
+test("M5 - undo and redo return the document and the mask exactly", () => {
+  const grid = new StaggeredGrid(24, 24, 1 / 24);
+  const editor = new GeometryEditor();
+  const snapshots = [];
+
+  const record = () => {
+    applyDocument(grid, editor.document);
+    snapshots.push(maskOf(grid));
+  };
+  record();
+  editor.append(TOOLS.rectangle(0.2, 0.2, 0.5, 0.5));
+  record();
+  editor.append(TOOLS.circle(0.7, 0.5, 0.15));
+  record();
+  editor.append(TOOLS.eraseRectangle(0.3, 0.3, 0.4, 0.4));
+  record();
+
+  // Walking back must reproduce each earlier mask byte for byte, not merely a
+  // mask with the same shapes in it.
+  for (let n = snapshots.length - 2; n >= 0; n--) {
+    assert.ok(editor.undo(), "undo should have something to undo");
+    applyDocument(grid, editor.document);
+    assert.equal(maskOf(grid), snapshots[n], `undo to step ${n} produced a different mask`);
+  }
+  assert.equal(editor.canUndo, false);
+
+  for (let n = 1; n < snapshots.length; n++) {
+    assert.ok(editor.redo());
+    applyDocument(grid, editor.document);
+    assert.equal(maskOf(grid), snapshots[n], `redo to step ${n} produced a different mask`);
+  }
+  assert.equal(editor.canRedo, false);
+  console.log(`[M5 editing] undo/redo reproduced all ${snapshots.length} masks byte for byte`);
+});
+
+test("M5 - a new edit discards the redo branch, and an invalid edit changes nothing", () => {
+  const editor = new GeometryEditor();
+  editor.append(TOOLS.rectangle(0, 0, 0.5, 0.5)).append(TOOLS.circle(0.8, 0.8, 0.1));
+  editor.undo();
+  assert.equal(editor.canRedo, true);
+  editor.append(TOOLS.circle(0.2, 0.8, 0.1));
+  assert.equal(editor.canRedo, false, "a new edit must discard what redo would have replayed");
+
+  // A rejected edit must leave the document and the history untouched, not
+  // half-applied.
+  const before = JSON.stringify(editor.document);
+  const revision = editor.revision;
+  const error = captureThrow(() => editor.append({ op: "add", region: { kind: "disk", cx: 0, cy: 0, radius: 1 } }));
+  assert.ok(error, "a disk without an explicit metric is invalid");
+  assert.equal(JSON.stringify(editor.document), before, "the document changed despite the edit failing");
+  assert.equal(editor.revision, revision, "the revision advanced despite the edit failing");
+});
+
+test("M5 - a geometry edit restarts the run rather than patching the field", () => {
+  const session = new SimulationSession("cylinder");
+  for (let n = 0; n < 60; n++) session.advance();
+  assert.equal(session.iteration, 60);
+  assert.ok(session.simulatedTime > 0);
+
+  session.applyEdit(TOOLS.circle(7.0, 3.0, 0.4));
+  assert.equal(session.iteration, 0, "the run must restart");
+  assert.equal(session.simulatedTime, 0);
+  assert.equal(session.fieldIsStale, false, "the field must be consistent with the new mask");
+
+  // The field must be the scenario's own initial condition, not a patched
+  // version of the old one. Compared against a freshly built session carrying
+  // the same document.
+  const fresh = new SimulationSession("cylinder");
+  fresh.applyEdit(TOOLS.circle(7.0, 3.0, 0.4));
+  for (const field of ["u", "v", "p"]) {
+    assert.ok(
+      Buffer.from(session.grid[field].buffer).equals(Buffer.from(fresh.grid[field].buffer)),
+      `${field} after an edit differs from a fresh build with the same geometry`
+    );
+  }
+
+  // And it must be able to run on from there.
+  const result = session.advance();
+  assert.ok(result.poissonConverged);
+  assert.ok(computeDivergence(session.grid).max < session.params.divergenceTol);
+  console.log(
+    `[M5 editing] edit after 60 steps: restarted at iteration 0, field identical to a fresh ` +
+    `build, next step converged at div ${computeDivergence(session.grid).max.toExponential(2)}`
+  );
+});
+
+test("M5 - newly fluid cells carry the scenario's initial condition, not stale flow", () => {
+  // The specific hazard the restart avoids. Carving away part of an obstacle
+  // exposes cells that were solid: they have no history, and whatever numbers
+  // their slots happened to hold are meaningless.
+  const session = new SimulationSession("cylinder");
+  for (let n = 0; n < 80; n++) session.advance();
+
+  const wasSolid = [];
+  for (let j = 1; j <= session.grid.ny; j++) {
+    for (let i = 1; i <= session.grid.nx; i++) {
+      if (session.grid.solid[session.grid.idx(i, j)]) wasSolid.push(session.grid.idx(i, j));
+    }
+  }
+  assert.ok(wasSolid.length > 0);
+
+  // Remove the cylinder entirely.
+  session.clearGeometry();
+  let exposed = 0;
+  for (const k of wasSolid) {
+    if (session.grid.solid[k]) continue;
+    exposed++;
+    // The cylinder scenario seeds a uniform stream, so that is what an exposed
+    // cell must hold - not zero, and not a leftover from the wake.
+    assert.equal(session.grid.u[k], 1, `exposed cell holds ${session.grid.u[k]}, not the seeded stream`);
+    assert.equal(session.grid.v[k], 0);
+    assert.equal(session.grid.p[k], 0);
+  }
+  assert.ok(exposed > 100, `expected the cylinder's cells to be exposed, got ${exposed}`);
+  console.log(`[M5 editing] ${exposed} cells exposed by erasing the cylinder, all at the seeded initial state`);
+});
+
+test("M5 - stepping a field whose mask has moved is refused, however it moved", () => {
+  // The guard keys on whether the field is consistent with the mask, which is
+  // the property that matters - not on whether the editing API was used. A
+  // mask changed by any route counts.
+  const session = new SimulationSession("cavity");
+  session.advance();
+
+  applyDocument(session.grid, { operations: [{ op: "add", region: { kind: "rect", x0: 0.4, y0: 0, x1: 0.6, y1: 1 } }] });
+  assert.equal(session.fieldIsStale, true);
+
+  const error = captureThrow(() => session.advance());
+  assert.ok(error, "expected the step to be refused");
+  assert.equal(error.name, "StaleFieldError");
+  assert.match(error.message, /moving-boundary problem/);
+
+  session.reset();
+  assert.equal(session.fieldIsStale, false);
+  session.advance();
+  console.log("[M5 editing] a mask changed outside the session still trips the guard");
+});
+
+test("M5 - the tracer restarts with the field", () => {
+  const session = new SimulationSession("cavity");
+  const seeded = session.tracer.total(session.grid).total;
+  for (let n = 0; n < 40; n++) session.advance();
+  session.applyEdit(TOOLS.rectangle(0.45, 0, 0.55, 0.6));
+  const after = session.tracer.total(session.grid).total;
+  assert.ok(after > 0, "the tracer should be re-seeded, not left empty");
+  assert.ok(after < seeded, "and re-seeded against the new mask, which has more solid in it");
+  for (let j = 1; j <= session.grid.ny; j++) {
+    for (let i = 1; i <= session.grid.nx; i++) {
+      const k = session.grid.idx(i, j);
+      if (session.grid.solid[k]) assert.equal(session.tracer.c[k], 0, "dye left inside new solid");
+    }
+  }
+});
+
+test("M5 - switching scenario discards a document drawn against the old one", () => {
+  // A rectangle drawn at (6, 6) in a 7x7 bend means nothing in a 1x1 cavity.
+  const session = new SimulationSession("bend-sharp");
+  session.applyEdit(TOOLS.circle(6.5, 6.5, 0.2));
+  assert.equal(session.document.operations.length, 2);
+
+  session.load("cavity");
+  assert.equal(session.document.operations.length, 0, "the cavity has no geometry of its own");
+  assert.equal(session.canUndo, false, "and no history from the previous scenario");
+  assert.equal(session.iteration, 0);
 });
