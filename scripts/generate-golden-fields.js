@@ -9,7 +9,7 @@
 // changed the physics. Regenerate it only when a change to the fields is
 // intended, understood, and described in the commit that does it.
 
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { FIXTURE_CASES, measureFixtureCase, runFixtureCase } from "../tests/support/boundaryFixtures.js";
 
 const OUT = new URL("../tests/fixtures/golden-fields.json", import.meta.url).pathname;
@@ -54,8 +54,29 @@ async function main() {
     return;
   }
 
+  // Entries for cases demonstrated to specify an ill-posed problem are carried
+  // forward verbatim rather than re-measured. Their recorded hashes are hashes
+  // of a broken field, and that is the point: they are the record of what was
+  // being asserted before the problem was found. Re-measuring would either
+  // throw or quietly replace the evidence.
+  let previous = {};
+  try {
+    previous = JSON.parse(await readFile(OUT, "utf8")).cases ?? {};
+  } catch {
+    // No existing record; every case gets measured.
+  }
+
   const cases = {};
   for (const entry of FIXTURE_CASES) {
+    if (entry.invalid) {
+      if (previous[entry.id]) {
+        cases[entry.id] = { ...previous[entry.id], invalid: entry.invalid };
+        process.stderr.write(`${entry.id.padEnd(28)} preserved (${entry.invalid})\n`);
+      } else {
+        process.stderr.write(`${entry.id.padEnd(28)} skipped, no prior record\n`);
+      }
+      continue;
+    }
     const measured = measureFixtureCase(entry);
     cases[entry.id] = measured;
     process.stderr.write(

@@ -1,6 +1,6 @@
 {
   "note": "Golden boundary-condition fields. Generated BEFORE the M4 refactor, from the solver as it stood at that commit. A mismatch means a change moved the physics; regenerate only when that is intended and say so in the commit. Run `npm run golden -- --diff <caseId>` to inspect a failing case.",
-  "generatedAt": "2026-08-27 01:53:53 UTC",
+  "generatedAt": "2026-08-28 01:56:18 UTC",
   "cases": {
     "real-cavity": {
       "id": "real-cavity",
@@ -143,7 +143,8 @@
       "p": "7ff08f7480be209022c10b13d4ee2dbe",
       "peakU": 1.103424594518912,
       "peakV": 0.49120681450433445,
-      "nonFiniteCells": 0
+      "nonFiniteCells": 0,
+      "invalid": "unbalanceable: no boundary condition here can absorb the net flux"
     },
     "through-flow-both-inflow": {
       "id": "through-flow-both-inflow",
@@ -169,6 +170,20 @@
       "p": "3d7575a135279b6285e09f31ef9fe995",
       "peakU": 1.5225479672170263,
       "peakV": 0.4697424216052943,
+      "nonFiniteCells": 0,
+      "invalid": "recorded before the outward-normal rescale fix; hashes are of an unbalanced field"
+    },
+    "zero-gradient-with-outlet": {
+      "id": "zero-gradient-with-outlet",
+      "group": "coverage",
+      "description": "zero-gradient stretches on all four sides, with an inlet and a real outlet",
+      "steps": 30,
+      "grid": "16x16",
+      "u": "fe206397c914cb71fccaad4bee03e75e",
+      "v": "74b60bf989ab7fdb10a0d4b8fb71d636",
+      "p": "e7fb0547f2bb225c4d459fdea3331dc7",
+      "peakU": 1.3950653881659265,
+      "peakV": 0.3774568637935286,
       "nonFiniteCells": 0
     },
     "obstacle-with-outflow": {

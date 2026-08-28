@@ -280,6 +280,39 @@ export const FIXTURE_CASES = [
       }),
   },
   {
+    // The well-posed replacement for `zero-gradient-box`. It carries
+    // zeroGradient on all four sides, which is the coverage that case was
+    // supposed to provide, but pairs it with a real outlet so the net flux the
+    // copied faces carry has somewhere to go. That is the whole difference: a
+    // zeroGradient face passes flux and takes no part in balancing it, so a
+    // domain made only of them has nothing that can absorb what it carries.
+    //
+    // Segments make this expressible at all - one condition per side cannot
+    // say "open along this stretch, wall along the rest".
+    id: "zero-gradient-with-outlet",
+    group: "coverage",
+    description: "zero-gradient stretches on all four sides, with an inlet and a real outlet",
+    build: () =>
+      shearedBox({
+        left: [
+          { from: 0, to: 0.25, type: "zeroGradient" },
+          { from: 0.25, to: 1, type: "inflow", u: 1, v: 0 },
+        ],
+        right: [
+          { from: 0, to: 0.25, type: "zeroGradient" },
+          { from: 0.25, to: 1, type: "outflow" },
+        ],
+        bottom: [
+          { from: 0, to: 0.25, type: "zeroGradient" },
+          { from: 0.25, to: 1, type: "wall" },
+        ],
+        top: [
+          { from: 0, to: 0.25, type: "zeroGradient" },
+          { from: 0.25, to: 1, type: "wall" },
+        ],
+      }),
+  },
+  {
     // An obstacle touching an outflow side, so some boundary faces are solid
     // and must be excluded from the flux rescale.
     id: "obstacle-with-outflow",

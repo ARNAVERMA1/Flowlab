@@ -85,13 +85,22 @@ test("M4 - the golden record covers every boundary type in every position", () =
   // A fixture that has drifted out of covering some branch is worse than none:
   // it reads as protection while the untested branch is exactly where a
   // per-side refactor goes wrong.
+  // Coverage is counted from WELL-POSED cases only. Counting a case that
+  // specifies an impossible problem inflates the figure without testing
+  // anything: `zero-gradient-box` carried this type on all four sides and was
+  // recording a field whose divergence was five orders of magnitude past what
+  // it reported. Coverage backed by such a case is coverage in name only.
   const seen = new Map(); // type -> set of sides
   for (const entry of FIXTURE_CASES) {
+    if (entry.invalid) continue;
     const { bc } = entry.build();
     for (const side of ["left", "right", "top", "bottom"]) {
-      const type = bc[side].type;
-      if (!seen.has(type)) seen.set(type, new Set());
-      seen.get(type).add(side);
+      // A side may carry segments, each with its own condition.
+      const entries = Array.isArray(bc[side]) ? bc[side] : [bc[side]];
+      for (const condition of entries) {
+        if (!seen.has(condition.type)) seen.set(condition.type, new Set());
+        seen.get(condition.type).add(side);
+      }
     }
   }
 
@@ -110,8 +119,9 @@ test("M4 - the golden record covers every boundary type in every position", () =
   assert.deepEqual(gaps, [], `golden coverage gaps:\n  ${gaps.join("\n  ")}`);
 
   console.log(
-    "[M4 golden] every type covered on all four sides: " +
-    [...seen.keys()].sort().join(", ")
+    "[M4 golden] every type covered on all four sides by well-posed cases: " +
+    [...seen.keys()].sort().join(", ") +
+    ` (${FIXTURE_CASES.filter((c) => c.invalid).length} ill-posed cases excluded from the count)`
   );
 });
 
